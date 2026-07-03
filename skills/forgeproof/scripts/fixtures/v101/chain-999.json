@@ -1,0 +1,75 @@
+[
+  {
+    "index": 0,
+    "timestamp": "2026-07-03T04:42:37.416883+00:00",
+    "action": "genesis",
+    "data": {
+      "issue": 999,
+      "title": "v1.0.1 compatibility fixture",
+      "requirements": [
+        "REQ-1: fixture artifact hashes and verifies forever"
+      ]
+    },
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "hash": "d61defc13bd9f11d888a138109c8d528318d289c7214951b84e8462b42232adc",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgK1X95rki2xWMJ+TD/rDe0iBwfU\n7NyhadTpZmBeRdCLUAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAECTBK+297sfE/dFhs9u2oeA8BDpwK043uFZmioHrtq+81vhPpTa+xieFF\n4fN4vsS7Up0OGi1l7F0WV41vkEUBwH\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 1,
+    "timestamp": "2026-07-03T04:42:37.556252+00:00",
+    "action": "file-edit",
+    "data": {
+      "path": "src/example.py",
+      "operation": "create",
+      "sha256": "9b03eb339790e7de6c48ae1e59ecc264e8f6dd382db7b26b5d74ab3f0a1e5f32"
+    },
+    "prev_hash": "d61defc13bd9f11d888a138109c8d528318d289c7214951b84e8462b42232adc",
+    "hash": "5b87b22ec3b06b5ab311536174ff8fb1fd35a086c820e3693899cd8e2ac54e00",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgK1X95rki2xWMJ+TD/rDe0iBwfU\n7NyhadTpZmBeRdCLUAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEAeGNAt4fS863i6VZkn7qSiifVDdft3+Y7+ehpK+oXIKiABHB5MPqgR+c\n6kgSaN94Rx2BVZy7rlacjlaFyCmesI\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 2,
+    "timestamp": "2026-07-03T04:42:37.648437+00:00",
+    "action": "decision",
+    "data": {
+      "context": "Freeze v1.0.x behavior before the v1.1.0 engine changes",
+      "choice": "Generate this bundle with the unmodified v1.0.1 engine",
+      "rationale": "ROADMAP Principle 1: any .rpack ever signed must verify with every future verifier"
+    },
+    "prev_hash": "5b87b22ec3b06b5ab311536174ff8fb1fd35a086c820e3693899cd8e2ac54e00",
+    "hash": "dcbd5c317d83b32644c4e23a5550f0e90c52f6dcf97cfc6310b3286c38351a0f",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgK1X95rki2xWMJ+TD/rDe0iBwfU\n7NyhadTpZmBeRdCLUAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEANZr0NljktB+64ZE4QPBnli/iZVaDxesdlt80RIGuDdxL7OdQpTjeOIi\nS+JRP1IrLin2KHh04fQGdBg6cTzFIL\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 3,
+    "timestamp": "2026-07-03T04:42:37.741686+00:00",
+    "action": "test-result",
+    "data": {
+      "suite": "pytest",
+      "passed": 2,
+      "failed": 0,
+      "coverage": {
+        "REQ-1": [
+          "test_fixture_roundtrip",
+          "test_fixture_hash"
+        ]
+      },
+      "failed_tests": []
+    },
+    "prev_hash": "dcbd5c317d83b32644c4e23a5550f0e90c52f6dcf97cfc6310b3286c38351a0f",
+    "hash": "5ab3315b16fc2b24cd2e5a46aad20eaac601b92349ca8ce5be47138db569f5b3",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgK1X95rki2xWMJ+TD/rDe0iBwfU\n7NyhadTpZmBeRdCLUAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEDNjHHXOS9K3lBGLPOnjGQOWNJJby8BqBxiHfEoXJ00rjoDDzOXCRjVGV\nA/FCoyu2wxvC2v2zz/GEIilscWeFoN\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 4,
+    "timestamp": "2026-07-03T04:42:37.832642+00:00",
+    "action": "finalize",
+    "data": {
+      "commit_sha": "0000000000000000000000000000000000000000",
+      "chain_length": 5
+    },
+    "prev_hash": "5ab3315b16fc2b24cd2e5a46aad20eaac601b92349ca8ce5be47138db569f5b3",
+    "hash": "2ff436bff17921396b1849cf5a8ef1aae8eee76fd82a47b972c2c4658a77c80d",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgK1X95rki2xWMJ+TD/rDe0iBwfU\n7NyhadTpZmBeRdCLUAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEDtK117kjWBUftXlTYVPLIgd9zQqpKK7FXjuhXXitB2V03mR+XxwssSsY\nsA2XVZt79I18USYZo5I00+7VEq+YwN\n-----END SSH SIGNATURE-----"
+  }
+]

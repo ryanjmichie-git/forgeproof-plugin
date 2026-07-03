@@ -1,0 +1,4 @@
+# Compatibility fixtures are byte-exact: recorded hashes cover the raw bytes
+# (chain_hash over the chain file, sha256 over the artifact). EOL conversion
+# on checkout would silently break the forever-compat test on Windows.
+skills/forgeproof/scripts/fixtures/** -text
