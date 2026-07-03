@@ -50,7 +50,7 @@ ForgeProof auto-detects your project's language and toolchain:
 
 | Language | Config file | Test runner | Linter |
 |----------|-------------|-------------|--------|
-| Python | `pyproject.toml`, `setup.cfg` | pytest | ruff, flake8 |
+| Python | `pyproject.toml`, `setup.cfg`, `setup.py`, `requirements.txt` | pytest | ruff, flake8 |
 | TypeScript/JavaScript | `package.json` | jest, vitest, mocha | eslint |
 | Go | `go.mod` | go test | golangci-lint |
 
@@ -165,7 +165,7 @@ ForgeProof stores provenance data locally in the `.forgeproof/` directory at you
 
 ForgeProof registers two hooks. Honest accounting of what they cost and when they act:
 
-- **PreToolUse (PR gate)** — Spawns on *every* Bash tool call while the plugin is enabled (a fast, read-only Python process that exits immediately for anything that isn't `gh pr create`). When the command *is* `gh pr create` and no signed `.rpack` exists in `.forgeproof/`, it blocks the call and tells Claude to run `/forgeproof:run` first. It blocks through two independent protocols (a structured permission denial on stdout and exit code 2), so the gate fails **closed** regardless of which one your Claude Code version honors.
+- **PreToolUse (PR gate)** — Spawns on *every* Bash or PowerShell tool call while the plugin is enabled (a fast, read-only Python process that exits immediately for anything that isn't `gh pr create`). When the command *is* `gh pr create` and no signed `.rpack` exists in `.forgeproof/`, it blocks the call and tells Claude to run `/forgeproof:run` first. Both shell tools are gated — covering Bash alone would let PRs bypass provenance from Windows PowerShell sessions. It blocks through two independent protocols (a structured permission denial on stdout and exit code 2), so the gate fails **closed** regardless of which one your Claude Code version honors.
 
 - **PostToolUse (lint feedback)** — Spawns after each `Edit`/`Write` and exits silently unless an active ForgeProof chain exists (`.forgeproof/chain-*.json`). During an active run it lints **only the edited file** (never the whole project) and surfaces up to 20 lines of findings to Claude as context. It never blocks an edit.
 

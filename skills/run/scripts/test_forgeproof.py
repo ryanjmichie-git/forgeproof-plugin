@@ -38,6 +38,18 @@ spec.loader.exec_module(fp)
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _isolated_system_temp(tmp_path_factory, monkeypatch):
+    """Keep every engine temp-dir operation away from the real system temp.
+    Without this, cmd_reset --all (which globs and DELETES
+    forgeproof_*_ed25519* in tempfile.gettempdir()) would destroy real
+    in-progress signing keys machine-wide when the tests run, and key-file
+    assertions would flake on leftovers."""
+    tdir = tmp_path_factory.mktemp("fp-system-temp")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tdir))
+    return tdir
+
+
 @pytest.fixture
 def tmp_chain_dir(tmp_path, monkeypatch):
     """Redirect CHAIN_DIR to a temp directory."""
@@ -235,6 +247,17 @@ class TestCmdInit:
         err = capsys.readouterr().err
         assert "removed in v1.1.0" in err
         assert "--title" in err
+
+    def test_init_rejects_non_numeric_issue_before_keygen(
+            self, tmp_chain_dir, capsys, _isolated_system_temp):
+        """Validation must precede side effects: a bad --issue must not leave
+        orphaned key files in the temp directory."""
+        with patch.object(fp, "generate_ephemeral_keypair",
+                          side_effect=AssertionError("keygen must not run")):
+            with pytest.raises(SystemExit):
+                fp.cmd_init(self._make_args(issue="not-a-number"))
+        assert "--issue must be a number" in capsys.readouterr().err
+        assert list(_isolated_system_temp.iterdir()) == []
 
     def test_init_genesis_block_structure(self, tmp_chain_dir):
         keygen_patch, sign_patch = self._mock_keygen_and_sign(tmp_chain_dir)
@@ -673,7 +696,24 @@ class TestCmdGatePr:
         event = {"tool_name": "Bash", "tool_input": {"command": "ls -la"}}
         assert self._run_gate(event) == 0
 
-    def test_allows_non_bash_tool(self, tmp_chain_dir):
+    def test_blocks_powershell_tool(self, tmp_chain_dir, capsys):
+        """Claude Code on Windows has a first-class PowerShell tool; the gate
+        must cover it or 'gh pr create' via PowerShell bypasses provenance."""
+        event = {"tool_name": "PowerShell",
+                 "tool_input": {"command": "gh pr create --fill"}}
+        assert self._run_gate(event) == 2
+        captured = capsys.readouterr()
+        assert "BLOCK" in captured.err
+        assert json.loads(captured.out)[
+            "hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_allows_powershell_with_bundle(self, tmp_chain_dir):
+        (tmp_chain_dir / "issue-1.rpack").write_text("{}")
+        event = {"tool_name": "PowerShell",
+                 "tool_input": {"command": "gh pr create --fill"}}
+        assert self._run_gate(event) == 0
+
+    def test_allows_non_shell_tool(self, tmp_chain_dir):
         event = {"tool_name": "Edit", "tool_input": {"file_path": "/tmp/x"}}
         assert self._run_gate(event) == 0
 
@@ -1036,7 +1076,7 @@ class TestHooksConfig:
 
         pre = hooks["PreToolUse"]
         assert len(pre) == 1
-        assert pre[0]["matcher"] == "Bash"
+        assert pre[0]["matcher"] == "Bash|PowerShell"
         post = hooks["PostToolUse"]
         assert len(post) == 1
         assert post[0]["matcher"] == "Edit|Write"
@@ -1080,8 +1120,11 @@ class TestHooksConfig:
         exact equality so any drift fails CI."""
         cfg = self._config()
         pre_matcher = cfg["hooks"]["PreToolUse"][0]["matcher"]
-        assert pre_matcher == "Bash"
+        assert pre_matcher == "Bash|PowerShell"
         assert re.fullmatch(pre_matcher, "Bash")
+        # Windows sessions expose a first-class PowerShell tool — the gate
+        # must fire for it too, or PRs bypass provenance there
+        assert re.fullmatch(pre_matcher, "PowerShell")
         assert not re.fullmatch(pre_matcher, "Edit")
         assert pre_matcher != "Bash(gh pr create)"
 
@@ -1157,42 +1200,60 @@ SKILLS_DIR = SCRIPT_DIR.parent.parent
 _REDIRECT_TOKENS = {">", ">>", "|", "||", "&&", ";", "2>&1"}
 
 
-def _extract_engine_argvs(text: str):
-    """Yield (line, argv) for each engine invocation in fenced code blocks."""
+def _candidate_lines(text: str):
+    """Every place a SKILL.md can document an engine invocation: lines inside
+    fenced code blocks, plus inline code spans in prose (e.g. a numbered-list
+    step like: Run: `"$FP_PY" "$FP" issues --assignee @me`)."""
     for fence in re.findall(r"```[^\n]*\n(.*?)```", text, re.DOTALL):
         joined = re.sub(r"\\\n\s*", " ", fence)  # join line continuations
-        for raw in joined.splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "$FP" not in line and "forgeproof.py" not in line:
-                continue
-            # unwrap VAR=$(engine ...) command substitutions
-            m = re.match(r"^(?:export\s+)?[A-Za-z_]\w*=\$\((.+)\)$", line)
-            if m:
-                line_cmd = m.group(1).strip()
-            elif re.match(r"^(?:export\s+)?[A-Za-z_]\w*=", line):
-                continue  # plain assignment, e.g. FP=${CLAUDE_PLUGIN_ROOT}/...
-            else:
-                line_cmd = line
-            line_cmd = line_cmd.replace("$(git rev-parse HEAD)", "0" * 40)
+        yield from joined.splitlines()
+    without_fences = re.sub(r"```[^\n]*\n.*?```", "", text, flags=re.DOTALL)
+    yield from re.findall(r"`([^`\n]+)`", without_fences)
+
+
+def _extract_engine_argvs(text: str):
+    """Yield (line, argv) for each documented engine invocation."""
+    for raw in _candidate_lines(text):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "$FP" not in line and "forgeproof.py" not in line:
+            continue
+        # unwrap VAR=$(engine ...) command substitutions
+        m = re.match(r"^(?:export\s+)?[A-Za-z_]\w*=\$\((.+)\)$", line)
+        if m:
+            line_cmd = m.group(1).strip()
+        elif re.match(r"^(?:export\s+)?[A-Za-z_]\w*=", line):
+            continue  # plain assignment, e.g. FP=${CLAUDE_PLUGIN_ROOT}/...
+        else:
+            line_cmd = line
+        line_cmd = line_cmd.replace("$(git rev-parse HEAD)", "0" * 40)
+        try:
             tokens = shlex.split(line_cmd)
-            # locate the engine script token
-            idx = None
-            for i, tok in enumerate(tokens):
-                if tok == "$FP" or tok.endswith("forgeproof.py"):
-                    idx = i
-                    break
-            if idx is None:
-                continue
-            argv = tokens[idx + 1:]
-            for stop in _REDIRECT_TOKENS:
-                if stop in argv:
-                    argv = argv[:argv.index(stop)]
-            # placeholders and shell variables -> parseable dummies
-            argv = [re.sub(r"<[^<>]+>", "1", tok) for tok in argv]
-            argv = [re.sub(r"\$\{?\w+\}?", "1", tok) for tok in argv]
-            yield line, argv
+        except ValueError:
+            # untokenizable engine line = broken example; surface it
+            yield line, ["<<untokenizable>>"]
+            continue
+        # locate the engine script token
+        idx = None
+        for i, tok in enumerate(tokens):
+            if tok == "$FP" or tok.endswith("forgeproof.py"):
+                idx = i
+                break
+        if idx is None:
+            continue
+        argv = tokens[idx + 1:]
+        for stop in _REDIRECT_TOKENS:
+            if stop in argv:
+                argv = argv[:argv.index(stop)]
+        if not argv:
+            continue  # prose mention of `$FP` itself, not an invocation
+        if "..." in argv or "<subcommand>" in line_cmd:
+            continue  # pseudo-syntax illustration, not a runnable example
+        # placeholders and shell variables -> parseable dummies
+        argv = [re.sub(r"<[^<>]+>", "1", tok) for tok in argv]
+        argv = [re.sub(r"\$\{?\w+\}?", "1", tok) for tok in argv]
+        yield line, argv
 
 
 class TestSkillContract:
@@ -1200,14 +1261,23 @@ class TestSkillContract:
     the real argparse surface — a stale example is a loud CI failure, not a
     silent runtime break inside a Claude session."""
 
-    def test_skill_examples_parse(self, capsys):
+    def test_skill_examples_parse(self, capsys, tmp_path):
+        """Two levels: argparse must accept the example, and for `record`
+        the per-action runtime validation must accept it too (an example
+        that parses but dies in _record_data_from_flags is just as broken)."""
+        stand_in_file = tmp_path / "example-artifact.py"
+        stand_in_file.write_text("x = 1\n")
         failures = []
         checked = 0
         for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
             for line, argv in _extract_engine_argvs(skill_md.read_text(encoding="utf-8")):
                 checked += 1
                 try:
-                    fp.build_parser().parse_args(argv)
+                    ns = fp.build_parser().parse_args(argv)
+                    if ns.command == "record":
+                        if ns.path is not None:
+                            ns.path = str(stand_in_file)
+                        fp._record_data_from_flags(ns)
                 except SystemExit as e:
                     if e.code not in (0, None):
                         failures.append(f"{skill_md.parent.name}: {line}")
@@ -1217,6 +1287,20 @@ class TestSkillContract:
             "the extractor is broken or the skills no longer document the engine"
         )
         assert failures == [], "\n".join(failures)
+
+    def test_skill_documented_engine_path_resolves(self):
+        """Each SKILL.md states the engine path in prose; a stale path there
+        sends Claude to a nonexistent file at runtime."""
+        pattern = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/(\S+?forgeproof\.py)")
+        for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+            text = skill_md.read_text(encoding="utf-8")
+            matches = pattern.findall(text)
+            assert matches, f"{skill_md.parent.name}: engine path not documented"
+            for rel in matches:
+                resolved = PLUGIN_ROOT / rel.rstrip("`")
+                assert resolved.is_file(), (
+                    f"{skill_md.parent.name}: documented engine path does not "
+                    f"exist: {rel}")
 
 
 # ---------------------------------------------------------------------------
@@ -1323,6 +1407,26 @@ class TestV101Compat:
         assert code == 1
         assert output["verified"] is False
         assert any("hash mismatch" in e.lower() for e in output["errors"])
+
+    def test_v101_tampered_signature_fails(self, tmp_path, monkeypatch, capsys):
+        """Exercises the Ed25519 failure branch specifically: the signature
+        field is excluded from the root digest, so corrupting it leaves the
+        digest intact — only real signature verification can catch it. A
+        verify_signature that false-positives makes this test fail."""
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        bundle = json.loads(rpack.read_text())
+        # Corrupt the base64 payload inside the SSHSIG armor
+        lines = bundle["signature"].splitlines()
+        middle = len(lines) // 2
+        lines[middle] = lines[middle][::-1]
+        bundle["signature"] = "\n".join(lines)
+        rpack.write_text(json.dumps(bundle, indent=2) + "\n")
+        monkeypatch.chdir(tmp_path)
+        code, output = self._verify(rpack, capsys)
+        assert code == 1
+        assert output["verified"] is False
+        assert any("signature verification FAILED" in e for e in output["errors"])
 
 
 # ---------------------------------------------------------------------------

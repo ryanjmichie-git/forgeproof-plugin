@@ -38,6 +38,11 @@ Linux with no `python` symlink. Bundle format unchanged — every v1.0.x
 
 ### Fixed
 
+- **PR gate now covers the PowerShell tool.** Claude Code on Windows exposes
+  a first-class PowerShell tool alongside Bash; the v1.0.x matcher (`Bash`)
+  and the gate's tool check let `gh pr create` through PowerShell bypass the
+  gate entirely. The matcher is now `Bash|PowerShell` and the gate accepts
+  both tool names.
 - **PR gate failed open on python3-only systems.** The v1.0.1 hook command
   `python3 ... gate-pr 2>/dev/null || python ... gate-pr` converted a
   legitimate block (exit 2) into `python: not found` (exit 127 —
@@ -78,7 +83,9 @@ Linux with no `python` symlink. Bundle format unchanged — every v1.0.x
   from the roadmap's Principle 1.
 - **CI platform matrix**: Ubuntu, macOS, Windows (default shell, Git Bash,
   and cmd.exe), a python3-only Debian container, and
-  `claude plugin validate --strict`.
+  `claude plugin validate` against the plugin manifest (`--strict` is
+  documented but not implemented on current CLI 2.1.x; CI adds it back
+  once the flag exists).
 - **Hook regression tests** that spawn the exact configured hook commands
   against block/allow scenarios, and a **skill-contract test** that parses
   every documented engine invocation against the real CLI.

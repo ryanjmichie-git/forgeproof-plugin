@@ -489,6 +489,9 @@ def cmd_detect(args: argparse.Namespace) -> None:
 def cmd_init(args: argparse.Namespace) -> None:
     """Initialize a provenance chain for an issue."""
     issue = args.issue
+    # Validate before any side effect (keypair generation writes temp files)
+    if not str(issue).isdigit():
+        die(f"--issue must be a number (got: {issue})")
     path = chain_path(issue)
 
     if path.exists():
@@ -1238,9 +1241,14 @@ def cmd_gate_pr(_args: argparse.Namespace) -> None:
     """PreToolUse gate: block 'gh pr create' if no .rpack bundle exists.
 
     Reads the hook event JSON from stdin. Exits 0 when the call should be
-    allowed (event unparseable, tool other than Bash, command not 'gh pr
-    create', or a bundle already exists in .forgeproof/). Exits 2 — Claude
-    Code's "block and surface stderr" code — when blocking.
+    allowed (event unparseable, tool that is not a shell, command not 'gh pr
+    create', or a bundle already exists in .forgeproof/). Blocks via
+    permissionDecision deny JSON on stdout plus exit 2 with the reason on
+    stderr.
+
+    Both shell tools are covered: Claude Code exposes Bash everywhere and a
+    first-class PowerShell tool on Windows — gating only Bash would let
+    'gh pr create' through PowerShell bypass the gate entirely.
     """
     try:
         event = json.loads(sys.stdin.read())
@@ -1250,7 +1258,7 @@ def cmd_gate_pr(_args: argparse.Namespace) -> None:
     tool = event.get("tool_name", "")
     cmd = event.get("tool_input", {}).get("command", "")
 
-    if tool != "Bash" or "gh pr create" not in cmd:
+    if tool not in ("Bash", "PowerShell") or "gh pr create" not in cmd:
         sys.exit(0)
 
     if list(CHAIN_DIR.glob("*.rpack")):

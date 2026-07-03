@@ -78,7 +78,7 @@ Closes #$ISSUE
 <summary output from above>
 
 ---
-*This PR was generated with [ForgeProof](https://github.com/...). The `.rpack`
+*This PR was generated with [ForgeProof](https://github.com/ryanjmichie-git/forgeproof-plugin). The `.rpack`
 bundle in `.forgeproof/` is a cryptographically signed provenance record.
 Run `/forgeproof:verify .forgeproof/issue-$ISSUE.rpack` to verify integrity.*
 ```

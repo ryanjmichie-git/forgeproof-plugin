@@ -1,6 +1,6 @@
 # ForgeProof Privacy Policy
 
-**Last Updated:** 2026-04-15
+**Last Updated:** 2026-07-03
 
 ---
 
@@ -81,7 +81,7 @@ At no point are private keys:
 
 ### Reads
 - Project source files (to compute SHA-256 hashes for provenance)
-- `pyproject.toml`, `package.json`, `go.mod` (to detect project toolchain)
+- `pyproject.toml`, `setup.cfg`, `setup.py`, `requirements.txt`, `package.json`, `go.mod` (to detect project toolchain)
 - `.gitignore` (to check if it exists)
 - `.forgeproof/` directory contents (chain files, `.rpack` bundles)
 
@@ -101,25 +101,24 @@ ForgeProof does not:
 
 ## Scope of Activation
 
-**ForgeProof's hooks activate only during ForgeProof workflows, not on all sessions.**
+**ForgeProof's hooks spawn a short-lived local Python process per matching tool call and act only during ForgeProof workflows.**
 
 ForgeProof registers two hooks:
 
-### PreToolUse Hook
-- **Matcher:** `Bash(gh pr create)` — fires only when Claude attempts to run `gh pr create`
-- **Behavior:** Checks if a signed `.rpack` bundle exists in `.forgeproof/`. If not, blocks the PR creation with an informational message.
-- **Scope:** Only relevant when creating GitHub PRs. Does not fire on any other command.
+### PreToolUse Hook (PR gate)
+- **Matcher:** `Bash|PowerShell` — the hook process spawns on every Bash or PowerShell tool call while the plugin is enabled. It is read-only and exits immediately (allow) for any command that is not `gh pr create`.
+- **Behavior:** For `gh pr create`, checks whether a signed `.rpack` bundle exists in `.forgeproof/`. If not, blocks the PR creation with an informational message.
+- **Data handling:** The hook reads the tool-call event (tool name and command string) from stdin to make that one local decision. It does not log, store, or transmit it.
 
-### PostToolUse Hook
-- **Matcher:** `Edit|Write` — fires after file edit operations
-- **Behavior:** Checks if an active ForgeProof chain exists (`.forgeproof/chain-*.json`). If no chain exists, the hook exits immediately as a no-op. If a chain exists, runs the project's detected linter.
-- **Scope:** Effectively no-op outside of active `/forgeproof:run` runs.
+### PostToolUse Hook (lint feedback)
+- **Matcher:** `Edit|Write` — the hook process spawns after file edit operations.
+- **Behavior:** Exits immediately as a no-op unless an active ForgeProof chain exists (`.forgeproof/chain-*.json`). During an active run it lints only the edited file and surfaces the findings to Claude. It never blocks an edit.
+- **Scope:** No-op outside of active `/forgeproof:run` runs.
 
 Neither hook:
-- Fires on all sessions indiscriminately
 - Reads or logs prompt content
 - Transmits data anywhere
-- Runs background processes
+- Runs background processes (each invocation is a short-lived process that exits when its check completes)
 
 ---
 
@@ -176,4 +175,5 @@ The entire plugin is open source under the MIT license.
 
 | Date | Version | Change |
 |------|---------|--------|
+| 2026-07-03 | 1.1.0 | Updated hook scope to match v1.1.0 behavior (matcher `Bash\|PowerShell`, per-call spawn cost stated plainly, per-file lint); refreshed paths and command names after the skill rename |
 | 2026-04-15 | 1.0.0 | Initial privacy policy |

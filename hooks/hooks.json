@@ -1,9 +1,9 @@
 {
-  "description": "ForgeProof: PR gate (blocks gh pr create without a signed .rpack) and per-file lint during active runs. Each entry is a single quoted command with no shell chaining (v1.0.1's `||` fallback converted a block into exit 127 on python3-only systems). Two entries per event: whichever interpreter exists delivers the verdict; a missing interpreter is spawn noise, never a fake allow. The gate blocks via permissionDecision JSON on stdout AND exit 2, so it fails closed whichever protocol the running Claude Code honors. NOTE: exec-form entries (command + args array) are documented but were silently ignored at runtime by Claude Code 2.1.128 — do not convert these to exec form without a live plugin-loaded retest.",
+  "description": "ForgeProof: PR gate (blocks gh pr create without a signed .rpack, on both the Bash and PowerShell shell tools) and per-file lint during active runs. Each entry is a single quoted command with no shell chaining (v1.0.1's `||` fallback converted a block into exit 127 on python3-only systems). Two entries per event: whichever interpreter exists delivers the verdict; a missing interpreter is spawn noise, never a fake allow. The gate blocks via permissionDecision JSON on stdout AND exit 2, so it fails closed whichever protocol the running Claude Code honors. NOTE: exec-form entries (command + args array) are documented but were silently ignored at runtime by Claude Code 2.1.128 — do not convert these to exec form without a live plugin-loaded retest.",
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [
           {
             "type": "command",

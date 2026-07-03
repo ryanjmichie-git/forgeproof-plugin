@@ -34,7 +34,7 @@ The `hash` is computed over the canonical JSON (sorted keys, no whitespace) of t
 
 - **Hash chain**: Each block's `prev_hash` must equal the preceding block's `hash`. The genesis block uses 64 zeros as `prev_hash`.
 - **Tamper evidence**: Modifying any field in any block changes its hash, which breaks the chain linkage for all subsequent blocks.
-- **Signatures**: Each block is signed with the ephemeral Ed25519 key generated at `init` time. Signatures are verified using `ssh-keygen -Y verify`.
+- **Signatures**: Each block carries an Ed25519 signature (made with the ephemeral key generated at `init` time) over its hash. The verifier checks every block's hash and linkage, and cryptographically verifies the bundle's **root-digest signature** with `ssh-keygen -Y verify`; per-block signatures are recorded in the chain but are not individually re-verified by `verify` (the root signature covers the chain hash, which covers every block).
 
 ## Known Limitations
 
