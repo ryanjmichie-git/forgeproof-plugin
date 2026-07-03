@@ -662,7 +662,12 @@ class TestCmdGatePr:
     def test_blocks_when_no_bundle(self, tmp_chain_dir, capsys):
         event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
         assert self._run_gate(event) == 2
-        assert "BLOCK" in capsys.readouterr().err
+        captured = capsys.readouterr()
+        assert "BLOCK" in captured.err
+        # Dual-protocol: deny JSON on stdout for exit-code-independent blocking
+        decision = json.loads(captured.out)["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+        assert decision["hookEventName"] == "PreToolUse"
 
     def test_allows_unrelated_bash_command(self, tmp_chain_dir):
         event = {"tool_name": "Bash", "tool_input": {"command": "ls -la"}}
@@ -970,6 +975,177 @@ class TestDetectPortable:
         for banned in ("shell=True", "sha256sum", "head -20", "2>/dev/null",
                        '"which ', "shell_run"):
             assert banned not in source, f"shell-ism found in engine: {banned}"
+
+
+# ---------------------------------------------------------------------------
+# Hooks configuration (the loud PR-gate regression test)
+# ---------------------------------------------------------------------------
+
+PLUGIN_ROOT = SCRIPT_DIR.parents[2]
+HOOKS_JSON = PLUGIN_ROOT / "hooks" / "hooks.json"
+
+
+class TestHooksConfig:
+    """Guards the v1.0.0 silent-failure class: these tests assert the exact
+    matcher and handler shape AND spawn the exact configured commands against
+    a block-scenario event. A never-fires misconfiguration (wrong matcher,
+    wrong path, wrong form) fails loudly here — it cannot pass silently.
+
+    Shape note: entries are single-command SHELL strings, not exec-form
+    (command + args array). Exec form is documented, but Claude Code 2.1.128
+    silently ignored the args array at runtime (verified live 2026-07-03):
+    the manager spawned a bare `python`, which swallowed the stdin event and
+    exited 0 — the gate never fired and nothing errored. Keep these tests
+    asserting shell-string form until a live plugin-loaded retest proves
+    exec form works."""
+
+    _COMMAND_RE = re.compile(
+        r'^(python3?) "\$\{CLAUDE_PLUGIN_ROOT\}/skills/[^"]+/forgeproof\.py" (gate-pr|lint-hook)$'
+    )
+
+    def _config(self) -> dict:
+        return json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
+
+    def _argv(self, handler) -> list[str]:
+        """The argv the shell would produce from the configured command, with
+        ${CLAUDE_PLUGIN_ROOT} substituted the way Claude Code does."""
+        resolved = handler["command"].replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN_ROOT))
+        return shlex.split(resolved)
+
+    def _real_interpreters(self, handlers):
+        """(handler, argv) for each handler whose interpreter is a *working*
+        Python — on Windows, `python3` may resolve to the Microsoft Store
+        stub, which exists on PATH but is not an interpreter (exactly the
+        case the dual-entry design tolerates: its noise is non-blocking while
+        the real interpreter delivers the verdict)."""
+        available = []
+        for handler in handlers:
+            argv = self._argv(handler)
+            exe = shutil.which(argv[0])
+            if not exe:
+                continue
+            probe = subprocess.run([exe, "--version"], capture_output=True, text=True)
+            if probe.returncode == 0 and "Python" in (probe.stdout + probe.stderr):
+                available.append((handler, [exe] + argv[1:]))
+        return available
+
+    def test_structure(self):
+        cfg = self._config()
+        hooks = cfg["hooks"]  # top-level wrapper required by the plugin schema
+        assert set(hooks) == {"PreToolUse", "PostToolUse"}
+
+        pre = hooks["PreToolUse"]
+        assert len(pre) == 1
+        assert pre[0]["matcher"] == "Bash"
+        post = hooks["PostToolUse"]
+        assert len(post) == 1
+        assert post[0]["matcher"] == "Edit|Write"
+
+        for event_name, subcommand in (("PreToolUse", "gate-pr"),
+                                       ("PostToolUse", "lint-hook")):
+            handlers = hooks[event_name][0]["hooks"]
+            interpreters = []
+            for handler in handlers:
+                assert handler["type"] == "command"
+                assert isinstance(handler["timeout"], int)
+                m = self._COMMAND_RE.match(handler["command"])
+                assert m, (
+                    f"hook command must be a single quoted engine invocation: "
+                    f"{handler['command']}")
+                assert m.group(2) == subcommand
+                interpreters.append(m.group(1))
+                # script path resolves to a real file
+                argv = self._argv(handler)
+                assert Path(argv[1]).is_file(), f"hook target missing: {argv[1]}"
+            # dual interpreter, python3 first
+            assert interpreters == ["python3", "python"]
+
+    def test_no_shell_chaining_in_hooks(self):
+        """The v1.0.1 fail-open bug lived in shell chaining (`||` converted a
+        block into exit 127) and PowerShell 5.1 cannot even parse `||`. Each
+        command must stay a single simple invocation."""
+        cfg = self._config()
+        for event in cfg["hooks"].values():
+            for entry in event:
+                for handler in entry["hooks"]:
+                    cmd = handler["command"]
+                    for banned in ("||", "&&", "2>/dev/null", "|", ";", "$(", ">"):
+                        assert banned not in cmd, (
+                            f"shell syntax crept back into hook command: "
+                            f"{banned!r} in {cmd}")
+
+    def test_matcher_semantics(self):
+        """Matchers are exact-or-regex against the tool NAME only. The v1.0.0
+        bug was permission-rule syntax ('Bash(gh pr create)') here — assert
+        exact equality so any drift fails CI."""
+        cfg = self._config()
+        pre_matcher = cfg["hooks"]["PreToolUse"][0]["matcher"]
+        assert pre_matcher == "Bash"
+        assert re.fullmatch(pre_matcher, "Bash")
+        assert not re.fullmatch(pre_matcher, "Edit")
+        assert pre_matcher != "Bash(gh pr create)"
+
+        post_matcher = cfg["hooks"]["PostToolUse"][0]["matcher"]
+        assert re.fullmatch(post_matcher, "Edit")
+        assert re.fullmatch(post_matcher, "Write")
+        assert not re.fullmatch(post_matcher, "Bash")
+
+    def test_gate_dispatch_blocks_without_bundle(self, tmp_path):
+        """Spawn the exact configured command the way the hook manager would:
+        event JSON on stdin, cwd without a bundle. Must block via BOTH
+        protocols: permissionDecision deny JSON on stdout (shell- and
+        exit-code-independent) and exit 2 with the reason on stderr."""
+        entry = self._config()["hooks"]["PreToolUse"][0]
+        event = json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": "gh pr create --title x"}})
+        assert re.fullmatch(entry["matcher"], "Bash")
+
+        available = self._real_interpreters(entry["hooks"])
+        assert available, "no working python interpreter found on this machine"
+        for handler, argv in available:
+            result = subprocess.run(argv, input=event, capture_output=True,
+                                    text=True, cwd=tmp_path,
+                                    timeout=handler["timeout"])
+            assert result.returncode == 2, (
+                f"gate must BLOCK (exit 2), got {result.returncode}; "
+                f"stderr: {result.stderr}")
+            assert ".rpack" in result.stderr
+            decision = json.loads(result.stdout)["hookSpecificOutput"]
+            assert decision["hookEventName"] == "PreToolUse"
+            assert decision["permissionDecision"] == "deny"
+            assert ".rpack" in decision["permissionDecisionReason"]
+
+    def test_gate_dispatch_allows_with_bundle(self, tmp_path):
+        entry = self._config()["hooks"]["PreToolUse"][0]
+        event = json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": "gh pr create --title x"}})
+        (tmp_path / ".forgeproof").mkdir()
+        (tmp_path / ".forgeproof" / "issue-1.rpack").write_text("{}")
+
+        available = self._real_interpreters(entry["hooks"])
+        assert available
+        for handler, argv in available:
+            result = subprocess.run(argv, input=event, capture_output=True,
+                                    text=True, cwd=tmp_path,
+                                    timeout=handler["timeout"])
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == ""  # silence = defer to normal flow
+
+    def test_lint_hook_dispatch_silent_without_chain(self, tmp_path):
+        entry = self._config()["hooks"]["PostToolUse"][0]
+        target = tmp_path / "x.py"
+        target.write_text("x = 1\n")
+        event = json.dumps(
+            {"tool_name": "Edit", "tool_input": {"file_path": str(target)}})
+
+        available = self._real_interpreters(entry["hooks"])
+        assert available
+        for handler, argv in available:
+            result = subprocess.run(argv, input=event, capture_output=True,
+                                    text=True, cwd=tmp_path,
+                                    timeout=handler["timeout"])
+            assert result.returncode == 0
+            assert result.stdout.strip() == ""
 
 
 # ---------------------------------------------------------------------------

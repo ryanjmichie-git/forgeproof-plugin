@@ -1256,12 +1256,23 @@ def cmd_gate_pr(_args: argparse.Namespace) -> None:
     if list(CHAIN_DIR.glob("*.rpack")):
         sys.exit(0)
 
-    print(
-        "BLOCK: No .rpack bundle found in .forgeproof/. "
+    reason = (
+        "No .rpack bundle found in .forgeproof/. "
         "Run /forgeproof:run first to generate a provenance bundle, "
-        "then use /forgeproof:push to create the PR.",
-        file=sys.stderr,
+        "then use /forgeproof:push to create the PR."
     )
+    # Dual-protocol block: permissionDecision JSON on stdout is honored
+    # independent of shell and exit-code translation (e.g. PowerShell-spawned
+    # hooks); exit 2 + stderr is the classic path. Whichever protocol the
+    # running Claude Code honors, the gate fails closed.
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }))
+    print(f"BLOCK: {reason}", file=sys.stderr)
     sys.exit(2)
 
 
