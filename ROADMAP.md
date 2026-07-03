@@ -2,7 +2,7 @@
 
 **Thesis:** Don't certify the model — attest the work. As AI authors more of the world's code, a verifiable record of *what the AI did, who authorized it, and whether it changed since* stops being a nice-to-have and becomes infrastructure. Every release below advances one layer of that trust stack.
 
-*Last updated: 2026-07-02 · Maintainer: [@ryanjmichie-git](https://github.com/ryanjmichie-git) · Shipped details live in [CHANGELOG.md](CHANGELOG.md)*
+*Last updated: 2026-07-03 · Maintainer: [@ryanjmichie-git](https://github.com/ryanjmichie-git) · Shipped details live in [CHANGELOG.md](CHANGELOG.md)*
 
 This roadmap is directional, not a contract. Order is firm; timing is not. To influence it, open an issue or a discussion.
 
@@ -35,7 +35,7 @@ Fixed the two launch-critical hook bugs: missing top-level `hooks` wrapper in `h
 
 ---
 
-### 🔨 v1.1.0 — Runs everywhere
+### ✅ v1.1.0 — Runs everywhere
 
 **Narrative.** A provenance tool earns nothing if it breaks on the reviewer's machine. v1.0.x works where it was developed; v1.1.0 makes it work where users actually are — macOS, Windows, and minimal Linux — and cleans up the command surface so the plugin feels native to Claude Code. This is the trust floor: every later release assumes this one.
 

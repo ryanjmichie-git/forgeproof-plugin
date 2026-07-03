@@ -78,5 +78,6 @@ jobs:
       - run: npm install -g @anthropic-ai/claude-code
       # Always validate the plugin manifest explicitly: validating the repo
       # root would trigger marketplace mode (.claude-plugin/marketplace.json).
+      # (--strict is documented but not implemented on current CLI 2.1.x;
+      # add it back once `claude plugin validate --help` lists it.)
       - run: claude plugin validate .claude-plugin/plugin.json
-      - run: claude plugin validate .claude-plugin/plugin.json --strict
