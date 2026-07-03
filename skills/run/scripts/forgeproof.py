@@ -1046,7 +1046,7 @@ def cmd_summary(args: argparse.Namespace) -> None:
     lines.extend([
         "",
         "---",
-        f"*Verify: `/forgeproof-verify .forgeproof/issue-{issue}.rpack`*",
+        f"*Verify: `/forgeproof:verify .forgeproof/issue-{issue}.rpack`*",
     ])
 
     print("\n".join(lines))

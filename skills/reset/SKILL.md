@@ -1,5 +1,5 @@
 ---
-name: forgeproof-reset
+name: reset
 description: >
   Clean up ForgeProof local state for an issue or all issues. Deletes
   provenance chains, bundles, ephemeral keys, and optionally branches.
@@ -16,7 +16,7 @@ allowed-tools:
 
 Remove ForgeProof artifacts and optionally delete branches for a fresh run.
 
-The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py`
+The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/run/scripts/forgeproof.py`
 (referenced as `$FP` below). Determine the Python interpreter once: run
 `python3 --version`; if that fails or reports Python is not found, use
 `python`. Set `$FP_PY` to whichever succeeded. The examples use bash syntax;
@@ -80,4 +80,4 @@ For all issues, delete each remote forgeproof branch.
 ## Step 5 — Report
 
 Report what was cleaned up: files deleted, branches removed. Confirm the
-workspace is ready for a fresh `/forgeproof` run.
+workspace is ready for a fresh `/forgeproof:run` run.

@@ -46,4 +46,4 @@ The `finalize` block records the `commit_sha` at bundle creation time. If the br
 
 **What breaks:** The `commit_sha` in the bundle no longer matches the branch HEAD. Anyone correlating the bundle to git history will see a mismatch.
 
-**Workaround:** Re-run `/forgeproof` on the issue after rebasing to generate a fresh bundle with the new commit SHA. Use `/forgeproof-reset` to clean up the old state first.
+**Workaround:** Re-run `/forgeproof:run` on the issue after rebasing to generate a fresh bundle with the new commit SHA. Use `/forgeproof:reset` to clean up the old state first.

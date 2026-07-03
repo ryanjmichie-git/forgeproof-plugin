@@ -1,5 +1,5 @@
 ---
-name: forgeproof-verify
+name: verify
 description: >
   Verify a ForgeProof provenance bundle (.rpack file). Use when the user asks
   to "verify a bundle", "check provenance", "validate an rpack", "verify
@@ -17,7 +17,7 @@ allowed-tools:
 
 Verify the cryptographic integrity of a ForgeProof `.rpack` provenance bundle.
 
-The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py`
+The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/run/scripts/forgeproof.py`
 (referenced as `$FP` below). Determine the Python interpreter once: run
 `python3 --version`; if that fails or reports Python is not found, use
 `python`. Set `$FP_PY` to whichever succeeded. The examples use bash syntax;

@@ -1,5 +1,5 @@
 ---
-name: forgeproof
+name: run
 description: >
   Create provenance-tracked code from a GitHub issue with a cryptographically
   signed audit trail. Use when the user asks to "forgeproof an issue", "create
@@ -25,7 +25,7 @@ recorded in a tamper-evident Ed25519 hash chain. The output is an `.rpack`
 provenance bundle that proves what was done, why, and that nothing was
 altered after signing.
 
-The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py`.
+The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/run/scripts/forgeproof.py`.
 Reference it as `$FP` in all commands below for brevity.
 
 **Interpreter setup (do this once, before anything else):** determine the
@@ -215,7 +215,7 @@ Report the result to the user. Include:
 - The evaluation status (pass / partial / fail)
 - The requirement coverage summary
 - The path to the `.rpack` file
-- Next step: run `/forgeproof-push` to create a PR, or `/forgeproof-verify` to verify the bundle
+- Next step: run `/forgeproof:push` to create a PR, or `/forgeproof:verify` to verify the bundle
 
 ## Reference Documentation
 

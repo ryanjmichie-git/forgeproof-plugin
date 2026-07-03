@@ -8,7 +8,7 @@ on:
 # Single source of truth for the test-suite path (renamed in one place if the
 # skill directory moves).
 env:
-  FP_TESTS: skills/forgeproof/scripts/test_forgeproof.py
+  FP_TESTS: skills/run/scripts/test_forgeproof.py
 
 jobs:
   test:
