@@ -7,8 +7,11 @@ Integration tests require ssh-keygen: python -m pytest test_forgeproof.py -m int
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -179,12 +182,15 @@ class TestChainOperations:
 
 
 class TestCmdInit:
-    def _make_args(self, issue="1", data=None, force=False):
-        args = MagicMock()
-        args.issue = issue
-        args.data = data
-        args.force = force
-        return args
+    def _make_args(self, issue="1", title=None, requirements=(), force=False):
+        argv = ["init", "--issue", issue]
+        if title is not None:
+            argv += ["--title", title]
+        for r in requirements:
+            argv += ["--requirement", r]
+        if force:
+            argv.append("--force")
+        return fp.build_parser().parse_args(argv)
 
     def _mock_keygen_and_sign(self, tmp_chain_dir):
         """Context manager that mocks both keypair generation and signing."""
@@ -201,7 +207,8 @@ class TestCmdInit:
         with keygen_patch, sign_patch, patch("sys.stdout"):
             fp.cmd_init(self._make_args(
                 issue="1",
-                data='{"title": "Test", "requirements": ["REQ-1: Do it"]}',
+                title="Test",
+                requirements=("REQ-1: Do it",),
             ))
 
         assert (tmp_chain_dir / "chain-1.json").exists()
@@ -209,6 +216,25 @@ class TestCmdInit:
         assert len(chain) == 1
         assert chain[0]["action"] == "genesis"
         assert chain[0]["data"]["title"] == "Test"
+        assert chain[0]["data"]["requirements"] == ["REQ-1: Do it"]
+
+    def test_init_title_survives_quotes(self, tmp_chain_dir):
+        """The whole point of the flag surface: titles containing quote
+        characters reach the chain intact (v1.0.x quoted-JSON --data broke)."""
+        title = """He said "don't" — 100% of $titles `work` now"""
+        keygen_patch, sign_patch = self._mock_keygen_and_sign(tmp_chain_dir)
+        with keygen_patch, sign_patch, patch("sys.stdout"):
+            fp.cmd_init(self._make_args(issue="8", title=title))
+        chain = json.loads((tmp_chain_dir / "chain-8.json").read_text())
+        assert chain[0]["data"]["title"] == title
+
+    def test_init_data_flag_rejected(self, tmp_chain_dir, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            fp.build_parser().parse_args(["init", "--issue", "1", "--data", "{}"])
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert "removed in v1.1.0" in err
+        assert "--title" in err
 
     def test_init_genesis_block_structure(self, tmp_chain_dir):
         keygen_patch, sign_patch = self._mock_keygen_and_sign(tmp_chain_dir)
@@ -247,63 +273,155 @@ class TestCmdInit:
 
 
 class TestCmdRecord:
-    def _make_args(self, issue, action, data):
-        args = MagicMock()
-        args.issue = issue
-        args.action = action
-        args.data = data
-        return args
+    def _parse(self, *argv):
+        return fp.build_parser().parse_args(["record", *argv])
 
-    def test_record_appends_block(self, sample_chain, tmp_chain_dir):
-        issue, chain = sample_chain
+    def _record(self, *argv):
         with patch.object(fp, "get_key_path", return_value=None), patch("sys.stdout"):
-            fp.cmd_record(self._make_args(
-                issue=issue,
-                action="file-edit",
-                data='{"path": "test.py", "operation": "create", "sha256": "abc123"}',
-            ))
+            fp.cmd_record(self._parse(*argv))
+
+    def test_record_appends_block(self, sample_chain, tmp_chain_dir, tmp_path):
+        issue, chain = sample_chain
+        f = tmp_path / "test.py"
+        f.write_text("print('x')\n")
+        self._record("--issue", issue, "--action", "file-edit",
+                     "--path", str(f), "--operation", "create")
 
         loaded = fp.load_chain(issue)
         assert len(loaded) == 2
         assert loaded[1]["action"] == "file-edit"
+        # The engine computed the hash natively — no shell, no sha256sum
+        assert loaded[1]["data"]["sha256"] == fp.sha256_file(f)
 
     def test_record_increments_index(self, sample_chain, tmp_chain_dir):
         issue, chain = sample_chain
-        with patch.object(fp, "get_key_path", return_value=None), patch("sys.stdout"):
-            fp.cmd_record(self._make_args(
-                issue=issue, action="decision",
-                data='{"context": "test", "choice": "a", "rationale": "because"}',
-            ))
+        self._record("--issue", issue, "--action", "decision",
+                     "--context", "test", "--choice", "a", "--rationale", "because")
 
         loaded = fp.load_chain(issue)
         assert loaded[1]["index"] == 1
 
     def test_record_links_prev_hash(self, sample_chain, tmp_chain_dir):
         issue, chain = sample_chain
-        with patch.object(fp, "get_key_path", return_value=None), patch("sys.stdout"):
-            fp.cmd_record(self._make_args(
-                issue=issue, action="file-edit",
-                data='{"path": "a.py", "operation": "create", "sha256": "x"}',
-            ))
+        self._record("--issue", issue, "--action", "decision",
+                     "--context", "c", "--choice", "x", "--rationale", "r")
 
         loaded = fp.load_chain(issue)
         assert loaded[1]["prev_hash"] == loaded[0]["hash"]
 
-    def test_record_rejects_invalid_action(self, sample_chain, tmp_chain_dir):
+    def test_record_rejects_invalid_action(self, sample_chain, tmp_chain_dir, capsys):
         issue, _ = sample_chain
-        with pytest.raises(SystemExit):
-            fp.cmd_record(self._make_args(
-                issue=issue, action="invalid-action",
-                data='{"foo": "bar"}',
-            ))
+        with pytest.raises(SystemExit) as exc_info:
+            self._parse("--issue", issue, "--action", "invalid-action")
+        assert exc_info.value.code == 2
+        capsys.readouterr()
 
-    def test_record_rejects_invalid_json(self, sample_chain, tmp_chain_dir):
+    def test_record_rejects_data_flag(self, sample_chain, tmp_chain_dir, capsys):
+        issue, _ = sample_chain
+        with pytest.raises(SystemExit) as exc_info:
+            self._parse("--issue", issue, "--action", "decision", "--data", '{"x": 1}')
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert "removed in v1.1.0" in err
+        assert "--context" in err
+
+
+class TestCmdRecordFlags:
+    """The discrete-flag surface must produce data dicts byte-identical in
+    shape to what the v1.0.x --data JSON produced (bundle compat)."""
+
+    def _record(self, issue, *argv):
+        with patch.object(fp, "get_key_path", return_value=None), patch("sys.stdout"):
+            fp.cmd_record(fp.build_parser().parse_args(
+                ["record", "--issue", issue, *argv]))
+
+    def test_shapes_match_v101_literals(self, sample_chain, tmp_chain_dir, tmp_path):
+        issue, _ = sample_chain
+        f = tmp_path / "x.py"
+        f.write_text("y = 1\n")
+        cases = [
+            (
+                ["--action", "branch-create", "--branch", "forgeproof/1",
+                 "--base", "main", "--base-sha", "abc123"],
+                {"branch": "forgeproof/1", "base": "main", "base_sha": "abc123"},
+            ),
+            (
+                ["--action", "file-edit", "--path", str(f), "--operation", "create"],
+                {"path": str(f), "operation": "create", "sha256": fp.sha256_file(f)},
+            ),
+            (
+                ["--action", "decision", "--context", "ctx",
+                 "--choice", "ch", "--rationale", "why"],
+                {"context": "ctx", "choice": "ch", "rationale": "why"},
+            ),
+            (
+                ["--action", "test-result", "--suite", "pytest",
+                 "--passed", "3", "--failed", "1",
+                 "--covers", "REQ-1=test_a,test_b", "--covers", "REQ-2=test_c",
+                 "--failed-test", "test_d"],
+                {"suite": "pytest", "passed": 3, "failed": 1,
+                 "coverage": {"REQ-1": ["test_a", "test_b"], "REQ-2": ["test_c"]},
+                 "failed_tests": ["test_d"]},
+            ),
+            (
+                ["--action", "lint-result", "--tool", "ruff",
+                 "--errors", "0", "--warnings", "2"],
+                {"tool": "ruff", "errors": 0, "warnings": 2},
+            ),
+        ]
+        for argv, expected in cases:
+            self._record(issue, *argv)
+            assert fp.load_chain(issue)[-1]["data"] == expected, argv
+
+    def test_shapes_match_fixture_blocks(self):
+        """Key sets must equal what the real v1.0.1 engine wrote (the frozen
+        fixture), not just what this suite believes v1.0.1 wrote."""
+        chain = json.loads((FIXTURE_V101 / "chain-999.json").read_text())
+        by_action = {b["action"]: b["data"] for b in chain}
+        assert set(by_action["file-edit"]) == {"path", "operation", "sha256"}
+        assert set(by_action["decision"]) == {"context", "choice", "rationale"}
+        assert set(by_action["test-result"]) == {
+            "suite", "passed", "failed", "coverage", "failed_tests"}
+
+    def test_file_edit_missing_file_dies(self, sample_chain, tmp_chain_dir, capsys):
         issue, _ = sample_chain
         with pytest.raises(SystemExit):
-            fp.cmd_record(self._make_args(
-                issue=issue, action="file-edit",
-                data="not valid json{{{",
-            ))
+            self._record(issue, "--action", "file-edit",
+                         "--path", "does/not/exist.py", "--operation", "create")
+        assert "file not found" in capsys.readouterr().err
+
+    def test_wrong_flags_for_action_die(self, sample_chain, tmp_chain_dir, capsys):
+        issue, _ = sample_chain
+        with pytest.raises(SystemExit):
+            self._record(issue, "--action", "decision",
+                         "--context", "c", "--choice", "x", "--rationale", "r",
+                         "--branch", "nope")
+        err = capsys.readouterr().err
+        assert "unexpected --branch" in err
+        assert "--context" in err  # names the expected set
+
+    def test_missing_required_flag_dies(self, sample_chain, tmp_chain_dir, capsys):
+        issue, _ = sample_chain
+        with pytest.raises(SystemExit):
+            self._record(issue, "--action", "test-result", "--suite", "pytest")
+        err = capsys.readouterr().err
+        assert "missing" in err
+        assert "--passed" in err
+
+    def test_covers_malformed_dies(self, sample_chain, tmp_chain_dir, capsys):
+        issue, _ = sample_chain
+        with pytest.raises(SystemExit):
+            self._record(issue, "--action", "test-result", "--suite", "pytest",
+                         "--passed", "1", "--failed", "0", "--covers", "no-equals-sign")
+        assert "--covers" in capsys.readouterr().err
+
+    def test_zero_counts_are_recorded(self, sample_chain, tmp_chain_dir):
+        issue, _ = sample_chain
+        self._record(issue, "--action", "test-result", "--suite", "pytest",
+                     "--passed", "0", "--failed", "0")
+        data = fp.load_chain(issue)[-1]["data"]
+        assert data["passed"] == 0 and data["failed"] == 0
+        assert data["coverage"] == {} and data["failed_tests"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +680,375 @@ class TestCmdGatePr:
 
 
 # ---------------------------------------------------------------------------
+# cmd_finalize artifact recheck
+# ---------------------------------------------------------------------------
+
+
+class TestFinalizeRecheck:
+    """finalize must refuse to sign a bundle whose recorded artifacts no
+    longer match disk — and must not corrupt the chain when it refuses."""
+
+    def _setup(self, tmp_chain_dir, tmp_path, monkeypatch, issue="3"):
+        monkeypatch.chdir(tmp_path)
+        priv = tmp_path / "key"
+        pub = tmp_path / "key.pub"
+        priv.write_text("fake_private")
+        pub.write_text("ssh-ed25519 AAAA fake")
+        artifact = tmp_path / "art.py"
+        artifact.write_text("a = 1\n")
+        with patch.object(fp, "generate_ephemeral_keypair", return_value=(priv, pub)), \
+             patch.object(fp, "sign_ed25519", return_value="sig"), patch("sys.stdout"):
+            fp.cmd_init(fp.build_parser().parse_args(
+                ["init", "--issue", issue, "--title", "recheck", "--force"]))
+        self._record(issue, priv, "--action", "file-edit",
+                     "--path", "art.py", "--operation", "create")
+        return issue, artifact, priv
+
+    def _record(self, issue, priv, *argv):
+        with patch.object(fp, "get_key_path", return_value=priv), \
+             patch.object(fp, "sign_ed25519", return_value="sig"), patch("sys.stdout"):
+            fp.cmd_record(fp.build_parser().parse_args(
+                ["record", "--issue", issue, *argv]))
+
+    def _finalize(self, issue, priv):
+        args = fp.build_parser().parse_args(
+            ["finalize", "--issue", issue, "--commit", "0" * 40])
+        with patch.object(fp, "get_key_path", return_value=priv), \
+             patch.object(fp, "sign_ed25519", return_value="sig"), \
+             patch.object(fp, "delete_private_key"), \
+             patch.object(fp.shutil, "which", return_value=None), \
+             patch("sys.stdout"):
+            fp.cmd_finalize(args)
+
+    def test_finalize_dies_on_stale_artifact(
+            self, tmp_chain_dir, tmp_path, monkeypatch, capsys):
+        issue, artifact, priv = self._setup(tmp_chain_dir, tmp_path, monkeypatch)
+        chain_len_before = len(fp.load_chain(issue))
+        artifact.write_text("a = 2  # modified after recording\n")
+
+        with pytest.raises(SystemExit):
+            self._finalize(issue, priv)
+        err = capsys.readouterr().err
+        assert "artifact recheck failed" in err
+        assert "art.py" in err
+        # The refused finalize must not have appended a finalize block
+        assert len(fp.load_chain(issue)) == chain_len_before
+
+    def test_finalize_dies_on_missing_artifact(
+            self, tmp_chain_dir, tmp_path, monkeypatch, capsys):
+        issue, artifact, priv = self._setup(tmp_chain_dir, tmp_path, monkeypatch)
+        artifact.unlink()
+        with pytest.raises(SystemExit):
+            self._finalize(issue, priv)
+        assert "missing from disk" in capsys.readouterr().err
+
+    def test_finalize_succeeds_when_clean(
+            self, tmp_chain_dir, tmp_path, monkeypatch):
+        issue, artifact, priv = self._setup(tmp_chain_dir, tmp_path, monkeypatch)
+        self._finalize(issue, priv)
+        bundle = json.loads((tmp_chain_dir / f"issue-{issue}.rpack").read_text())
+        assert bundle["artifacts"] == [
+            {"path": "art.py", "operation": "create",
+             "sha256": fp.sha256_file(artifact)}]
+
+    def test_reedited_file_rechecks_latest_and_dedups(
+            self, tmp_chain_dir, tmp_path, monkeypatch):
+        """Earlier records of a re-edited file are superseded, not stale: the
+        recheck uses the latest record per path, and the bundle lists the file
+        once with the hash that matches disk."""
+        issue, artifact, priv = self._setup(tmp_chain_dir, tmp_path, monkeypatch)
+        artifact.write_text("a = 2\n")
+        self._record(issue, priv, "--action", "file-edit",
+                     "--path", "art.py", "--operation", "modify")
+        self._finalize(issue, priv)
+        bundle = json.loads((tmp_chain_dir / f"issue-{issue}.rpack").read_text())
+        assert bundle["artifacts"] == [
+            {"path": "art.py", "operation": "modify",
+             "sha256": fp.sha256_file(artifact)}]
+
+
+# ---------------------------------------------------------------------------
+# cmd_lint_hook (PostToolUse hook)
+# ---------------------------------------------------------------------------
+
+
+class TestCmdLintHook:
+    def _invoke(self, stdin_text: str) -> int:
+        with patch("sys.stdin", io.StringIO(stdin_text)):
+            with pytest.raises(SystemExit) as exc_info:
+                fp.cmd_lint_hook(MagicMock())
+        code = exc_info.value.code
+        return 0 if code is None else code
+
+    def _detection(self, argv=("lintx", "check", "."), language="python"):
+        return {"detected": True, "languages": [{
+            "language": language,
+            "config_files": ["pyproject.toml"],
+            "runtime_available": True,
+            "test_runner": None,
+            "linter": {"name": "lintx", "command": " ".join(argv), "argv": list(argv)},
+        }]}
+
+    def _event(self, path) -> str:
+        return json.dumps({"tool_name": "Edit", "tool_input": {"file_path": str(path)}})
+
+    def test_malformed_stdin_silent(self, tmp_chain_dir, capsys):
+        assert self._invoke("not json {") == 0
+        assert capsys.readouterr().out == ""
+
+    def test_no_active_chain_silent(self, tmp_chain_dir, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "x.py"
+        target.write_text("x = 1\n")
+        # No chain-*.json in CHAIN_DIR: the hook must not even detect/lint
+        with patch.object(fp, "detect_toolchain",
+                          side_effect=AssertionError("must not detect without a chain")):
+            assert self._invoke(self._event(target)) == 0
+        assert capsys.readouterr().out == ""
+
+    def _activate_chain(self, tmp_chain_dir):
+        (tmp_chain_dir / "chain-1.json").write_text("[]")
+
+    def test_clean_file_silent(self, tmp_chain_dir, tmp_path, monkeypatch, capsys):
+        self._activate_chain(tmp_chain_dir)
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "x.py"
+        target.write_text("x = 1\n")
+        clean = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch.object(fp, "detect_toolchain", return_value=self._detection()), \
+             patch.object(fp, "run", return_value=clean) as mock_run:
+            assert self._invoke(self._event(target)) == 0
+        assert capsys.readouterr().out == ""
+        # Lint ran against the single edited file, not the project
+        assert mock_run.call_args[0][0] == ["lintx", "check", "x.py"]
+
+    def test_findings_emitted_as_additional_context(
+            self, tmp_chain_dir, tmp_path, monkeypatch, capsys):
+        self._activate_chain(tmp_chain_dir)
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "x.py"
+        target.write_text("import os\n")
+        dirty = subprocess.CompletedProcess(
+            [], 1, stdout="x.py:1:1: F401 'os' imported but unused\n", stderr="")
+        with patch.object(fp, "detect_toolchain", return_value=self._detection()), \
+             patch.object(fp, "run", return_value=dirty):
+            assert self._invoke(self._event(target)) == 0  # findings never block
+        out = json.loads(capsys.readouterr().out)
+        hook_out = out["hookSpecificOutput"]
+        assert hook_out["hookEventName"] == "PostToolUse"
+        assert "F401" in hook_out["additionalContext"]
+        assert "x.py" in hook_out["additionalContext"]
+
+    def test_findings_truncated_to_20_lines(
+            self, tmp_chain_dir, tmp_path, monkeypatch, capsys):
+        self._activate_chain(tmp_chain_dir)
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "x.py"
+        target.write_text("x = 1\n")
+        many = "\n".join(f"x.py:{i}:1: E501 line too long" for i in range(1, 100))
+        dirty = subprocess.CompletedProcess([], 1, stdout=many, stderr="")
+        with patch.object(fp, "detect_toolchain", return_value=self._detection()), \
+             patch.object(fp, "run", return_value=dirty):
+            self._invoke(self._event(target))
+        context = json.loads(capsys.readouterr().out)[
+            "hookSpecificOutput"]["additionalContext"]
+        # header line + at most 20 finding lines
+        assert len(context.splitlines()) <= 21
+
+    def test_file_outside_project_silent(
+            self, tmp_chain_dir, tmp_path, monkeypatch, capsys, tmp_path_factory):
+        self._activate_chain(tmp_chain_dir)
+        monkeypatch.chdir(tmp_path)
+        outside = tmp_path_factory.mktemp("elsewhere") / "y.py"
+        outside.write_text("y = 1\n")
+        with patch.object(fp, "detect_toolchain",
+                          side_effect=AssertionError("must not lint outside files")):
+            assert self._invoke(self._event(outside)) == 0
+        assert capsys.readouterr().out == ""
+
+    def test_extension_language_mismatch_silent(
+            self, tmp_chain_dir, tmp_path, monkeypatch, capsys):
+        self._activate_chain(tmp_chain_dir)
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "notes.md"
+        target.write_text("# notes\n")
+        with patch.object(fp, "detect_toolchain", return_value=self._detection()), \
+             patch.object(fp, "run",
+                          side_effect=AssertionError("must not lint .md with a python linter")):
+            assert self._invoke(self._event(target)) == 0
+        assert capsys.readouterr().out == ""
+
+    def test_project_scope_linter_skipped(
+            self, tmp_chain_dir, tmp_path, monkeypatch, capsys):
+        """golangci-lint has no per-file mode; the hook must not run a
+        project-wide lint on every edit (that is the v1.0.x behavior this
+        release removes)."""
+        self._activate_chain(tmp_chain_dir)
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "m.go"
+        target.write_text("package m\n")
+        detection = self._detection(argv=("golangci-lint", "run"), language="go")
+        with patch.object(fp, "detect_toolchain", return_value=detection), \
+             patch.object(fp, "run",
+                          side_effect=AssertionError("must not run project-scope lint")):
+            assert self._invoke(self._event(target)) == 0
+        assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# Portable toolchain detection
+# ---------------------------------------------------------------------------
+
+
+class TestDetectPortable:
+    def test_find_project_python_prefers_venv(self, tmp_path):
+        if os.name == "nt":
+            venv_py = tmp_path / ".venv" / "Scripts" / "python.exe"
+        else:
+            venv_py = tmp_path / ".venv" / "bin" / "python"
+        venv_py.parent.mkdir(parents=True)
+        venv_py.write_text("")
+        assert fp.find_project_python(tmp_path) == str(venv_py)
+
+    def test_find_project_python_falls_back_to_engine(self, tmp_path):
+        assert fp.find_project_python(tmp_path) == sys.executable
+
+    def test_find_js_tool_filesystem_first(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "node_modules" / ".bin"
+        bin_dir.mkdir(parents=True)
+        for name in ("eslint", "eslint.cmd", "eslint.exe"):
+            (bin_dir / name).write_text("")
+        monkeypatch.setattr(fp.shutil, "which",
+                            lambda _: pytest.fail("PATH consulted before node_modules/.bin"))
+        found = fp.find_js_tool(tmp_path, "eslint")
+        assert found is not None
+        assert "node_modules" in found
+
+    def test_find_js_tool_never_probes_npx(self, tmp_path, monkeypatch):
+        """A missing JS tool is 'unavailable', never a network fetch."""
+        monkeypatch.setattr(fp.shutil, "which", lambda _: None)
+        with patch.object(fp, "run",
+                          side_effect=AssertionError("no subprocess probes for JS tools")):
+            assert fp.find_js_tool(tmp_path, "eslint") is None
+
+    def test_detect_structured_no_shell(self, tmp_path, monkeypatch):
+        """Simulated minimal machine (nothing on PATH): detection must use
+        list-form subprocess calls only and degrade gracefully."""
+        (tmp_path / "pyproject.toml").write_text("[project]\n")
+        (tmp_path / "package.json").write_text("{}\n")
+        (tmp_path / "go.mod").write_text("module x\n")
+        monkeypatch.setattr(fp.shutil, "which", lambda _: None)
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            assert isinstance(cmd, list), f"string command passed to run(): {cmd!r}"
+            assert not kwargs.get("shell"), f"shell=True used: {cmd!r}"
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(fp, "run", fake_run)
+        result = fp.detect_toolchain(tmp_path)
+
+        assert result["detected"] is True
+        langs = {l["language"]: l for l in result["languages"]}
+        assert set(langs) == {"python", "javascript", "go"}
+        # No node on PATH, no node_modules: JS runtime and tools unavailable
+        assert langs["javascript"]["runtime_available"] is False
+        assert langs["javascript"]["linter"] is None
+        assert langs["javascript"]["test_runner"]["available"] is False
+        assert langs["go"]["runtime_available"] is False
+        # Python probes ran (list-form) and produced argv + command pairs
+        assert calls
+        runner = langs["python"]["test_runner"]
+        assert isinstance(runner["argv"], list)
+        assert all(isinstance(a, str) for a in runner["argv"])
+        assert isinstance(runner["command"], str)
+
+    def test_engine_source_has_no_shell_isms(self):
+        source = FORGEPROOF_PY.read_text()
+        for banned in ("shell=True", "sha256sum", "head -20", "2>/dev/null",
+                       '"which ', "shell_run"):
+            assert banned not in source, f"shell-ism found in engine: {banned}"
+
+
+# ---------------------------------------------------------------------------
+# Skill contract: SKILL.md examples must parse against the real CLI
+# ---------------------------------------------------------------------------
+
+SKILLS_DIR = SCRIPT_DIR.parent.parent
+
+_REDIRECT_TOKENS = {">", ">>", "|", "||", "&&", ";", "2>&1"}
+
+
+def _extract_engine_argvs(text: str):
+    """Yield (line, argv) for each engine invocation in fenced code blocks."""
+    for fence in re.findall(r"```[^\n]*\n(.*?)```", text, re.DOTALL):
+        joined = re.sub(r"\\\n\s*", " ", fence)  # join line continuations
+        for raw in joined.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "$FP" not in line and "forgeproof.py" not in line:
+                continue
+            # unwrap VAR=$(engine ...) command substitutions
+            m = re.match(r"^(?:export\s+)?[A-Za-z_]\w*=\$\((.+)\)$", line)
+            if m:
+                line_cmd = m.group(1).strip()
+            elif re.match(r"^(?:export\s+)?[A-Za-z_]\w*=", line):
+                continue  # plain assignment, e.g. FP=${CLAUDE_PLUGIN_ROOT}/...
+            else:
+                line_cmd = line
+            line_cmd = line_cmd.replace("$(git rev-parse HEAD)", "0" * 40)
+            tokens = shlex.split(line_cmd)
+            # locate the engine script token
+            idx = None
+            for i, tok in enumerate(tokens):
+                if tok == "$FP" or tok.endswith("forgeproof.py"):
+                    idx = i
+                    break
+            if idx is None:
+                continue
+            argv = tokens[idx + 1:]
+            for stop in _REDIRECT_TOKENS:
+                if stop in argv:
+                    argv = argv[:argv.index(stop)]
+            # placeholders and shell variables -> parseable dummies
+            argv = [re.sub(r"<[^<>]+>", "1", tok) for tok in argv]
+            argv = [re.sub(r"\$\{?\w+\}?", "1", tok) for tok in argv]
+            yield line, argv
+
+
+class TestSkillContract:
+    """Every engine invocation documented in any SKILL.md must parse against
+    the real argparse surface — a stale example is a loud CI failure, not a
+    silent runtime break inside a Claude session."""
+
+    @pytest.mark.xfail(
+        reason="SKILL.md examples still use the removed v1.0.x --data surface; "
+               "rewritten in the skill-instructions phase of the v1.1.0 release",
+        strict=True,
+    )
+    def test_skill_examples_parse(self, capsys):
+        failures = []
+        checked = 0
+        for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+            for line, argv in _extract_engine_argvs(skill_md.read_text(encoding="utf-8")):
+                checked += 1
+                try:
+                    fp.build_parser().parse_args(argv)
+                except SystemExit as e:
+                    if e.code not in (0, None):
+                        failures.append(f"{skill_md.parent.name}: {line}")
+        capsys.readouterr()  # swallow argparse usage noise
+        assert checked >= 5, (
+            f"only {checked} engine invocations found across SKILL.md files — "
+            "the extractor is broken or the skills no longer document the engine"
+        )
+        assert failures == [], "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
 # v1.0.x compatibility (forever contract — ROADMAP Principle 1)
 # ---------------------------------------------------------------------------
 
@@ -693,50 +1180,37 @@ class TestEndToEnd:
         file_hash = fp.sha256_file(test_file)
 
         # 1. Init
-        init_args = MagicMock()
-        init_args.issue = issue
-        init_args.data = json.dumps({
-            "title": "Integration test",
-            "requirements": ["REQ-1: Print hello"],
-        })
-        init_args.force = True
-        fp.cmd_init(init_args)
+        fp.cmd_init(fp.build_parser().parse_args([
+            "init", "--issue", issue, "--force",
+            "--title", "Integration test",
+            "--requirement", "REQ-1: Print hello",
+        ]))
         capsys.readouterr()  # clear output
 
-        # 2. Record branch-create
-        rec_args = MagicMock()
-        rec_args.issue = issue
-        rec_args.action = "branch-create"
-        rec_args.data = json.dumps({"branch": "forgeproof/42", "base": "main", "base_sha": "abc"})
-        fp.cmd_record(rec_args)
-        capsys.readouterr()
+        def record(*argv):
+            fp.cmd_record(fp.build_parser().parse_args(
+                ["record", "--issue", issue, *argv]))
+            capsys.readouterr()
 
-        # 3. Record file-edit
-        rec_args.action = "file-edit"
-        rec_args.data = json.dumps({"path": str(test_file), "operation": "create", "sha256": file_hash})
-        fp.cmd_record(rec_args)
-        capsys.readouterr()
+        # 2. Record branch-create
+        record("--action", "branch-create",
+               "--branch", "forgeproof/42", "--base", "main", "--base-sha", "abc")
+
+        # 3. Record file-edit (engine hashes the file natively)
+        record("--action", "file-edit",
+               "--path", str(test_file), "--operation", "create")
 
         # 4. Record test-result
-        rec_args.action = "test-result"
-        rec_args.data = json.dumps({
-            "suite": "pytest", "passed": 1, "failed": 0,
-            "coverage": {"REQ-1": ["test_hello"]}, "failed_tests": [],
-        })
-        fp.cmd_record(rec_args)
-        capsys.readouterr()
+        record("--action", "test-result", "--suite", "pytest",
+               "--passed", "1", "--failed", "0", "--covers", "REQ-1=test_hello")
 
         # 5. Record lint-result
-        rec_args.action = "lint-result"
-        rec_args.data = json.dumps({"tool": "ruff", "errors": 0, "warnings": 0})
-        fp.cmd_record(rec_args)
-        capsys.readouterr()
+        record("--action", "lint-result", "--tool", "ruff",
+               "--errors", "0", "--warnings", "0")
 
         # 6. Finalize
-        fin_args = MagicMock()
-        fin_args.issue = issue
-        fin_args.commit = "abc123def456"
-        fp.cmd_finalize(fin_args)
+        fp.cmd_finalize(fp.build_parser().parse_args(
+            ["finalize", "--issue", issue, "--commit", "abc123def456"]))
         capsys.readouterr()
 
         rpack_path = tmp_chain_dir / f"issue-{issue}.rpack"
@@ -746,6 +1220,7 @@ class TestEndToEnd:
         assert bundle["evaluation"]["status"] == "pass"
         assert bundle["root_digest"]
         assert bundle["signature"]
+        assert bundle["artifacts"][0]["sha256"] == file_hash
 
         # 7. Verify — should pass
         ver_args = MagicMock()

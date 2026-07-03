@@ -13,7 +13,9 @@ Subcommands:
     verify      Verify a .rpack bundle's integrity
     summary     Output PR-ready summary for an issue
     issues      List open GitHub issues assigned to current user
-    lint        Run detected linter (used by PostToolUse hook)
+    lint        Run detected linter (project-wide, or one file via --file)
+    lint-hook   PostToolUse hook: lint the edited file during an active run
+    reset       Clean up provenance state for an issue (or --all)
     gate-pr     PreToolUse gate that blocks 'gh pr create' without a bundle
 """
 
@@ -83,11 +85,6 @@ def info(msg: str) -> None:
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     """Run a subprocess, returning the result."""
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-
-
-def shell_run(cmd: str, **kwargs) -> subprocess.CompletedProcess:
-    """Run a shell command string cross-platform (uses system shell, not sh -c)."""
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -293,76 +290,171 @@ def cmd_preflight(_args: argparse.Namespace) -> None:
 # Subcommand: detect
 # ---------------------------------------------------------------------------
 
+# Structured tool specs: availability is probed with list-form subprocess
+# calls and filesystem checks only — no shell strings, no POSIX tools, no
+# network (npx is only ever emitted with --no-install).
 TOOLCHAIN_MAP = {
     "python": {
         "config_files": ["pyproject.toml", "setup.cfg", "setup.py", "requirements.txt"],
         "test_runners": [
-            {"name": "pytest", "command": "python -m pytest", "check": "python -m pytest --version 2>/dev/null || python3 -m pytest --version 2>/dev/null"},
+            {"name": "pytest", "module": "pytest", "args": ["-m", "pytest"]},
         ],
         "linters": [
-            {"name": "ruff", "command": "python -m ruff check .", "check": "python -m ruff --version 2>/dev/null || python3 -m ruff --version 2>/dev/null"},
-            {"name": "flake8", "command": "python -m flake8 .", "check": "python -m flake8 --version 2>/dev/null || python3 -m flake8 --version 2>/dev/null"},
+            {"name": "ruff", "module": "ruff", "args": ["-m", "ruff", "check", "."]},
+            {"name": "flake8", "module": "flake8", "args": ["-m", "flake8", "."]},
         ],
-        "runtime_check": "python --version 2>/dev/null || python3 --version 2>/dev/null",
     },
     "javascript": {
         "config_files": ["package.json"],
         "test_runners": [
-            {"name": "jest", "command": "npx jest", "check": "npx jest --version 2>/dev/null"},
-            {"name": "vitest", "command": "npx vitest run", "check": "npx vitest --version 2>/dev/null"},
-            {"name": "mocha", "command": "npx mocha", "check": "npx mocha --version 2>/dev/null"},
+            {"name": "jest", "tool": "jest", "args": []},
+            {"name": "vitest", "tool": "vitest", "args": ["run"]},
+            {"name": "mocha", "tool": "mocha", "args": []},
         ],
         "linters": [
-            {"name": "eslint", "command": "npx eslint .", "check": "npx eslint --version 2>/dev/null"},
+            {"name": "eslint", "tool": "eslint", "args": ["."]},
         ],
-        "runtime_check": "which node",
     },
     "go": {
         "config_files": ["go.mod"],
         "test_runners": [
-            {"name": "go test", "command": "go test ./...", "check": "go version"},
+            {"name": "go test", "tool": "go", "args": ["test", "./..."]},
         ],
         "linters": [
-            {"name": "golangci-lint", "command": "golangci-lint run", "check": "which golangci-lint"},
+            {"name": "golangci-lint", "tool": "golangci-lint", "args": ["run"]},
         ],
-        "runtime_check": "which go",
     },
 }
 
+# Used by lint-hook to lint the edited file with the right language's linter.
+LANG_EXTENSIONS = {
+    "python": {".py", ".pyi"},
+    "javascript": {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"},
+    "go": {".go"},
+}
 
-def cmd_detect(args: argparse.Namespace) -> None:
-    """Detect project language and available toolchain."""
-    project_root = Path(args.project_root) if args.project_root else Path.cwd()
+
+def find_project_python(project_root: Path) -> str:
+    """Interpreter for the *project*, not the engine: prefer the project's
+    virtualenv so recorded test/lint results reflect its environment; fall
+    back to the interpreter running this script."""
+    if os.name == "nt":
+        candidates = ("Scripts/python.exe",)
+    else:
+        candidates = ("bin/python", "bin/python3")
+    for venv_dir in (".venv", "venv"):
+        for rel in candidates:
+            candidate = project_root / venv_dir / rel
+            if candidate.exists():
+                return str(candidate)
+    return sys.executable
+
+
+def find_js_tool(project_root: Path, tool: str) -> str | None:
+    """Locate a JS tool filesystem-first (node_modules/.bin), falling back to
+    PATH. Never probes via bare npx, which may fetch from the registry."""
+    bin_dir = project_root / "node_modules" / ".bin"
+    suffixes = (".cmd", ".exe", "") if os.name == "nt" else ("",)
+    for suffix in suffixes:
+        candidate = bin_dir / f"{tool}{suffix}"
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which(tool)
+
+
+def _python_candidates(project_root: Path, spec: dict) -> tuple[bool, list[dict], list[dict]]:
+    py = find_project_python(project_root)
+    runtime_ok = run([py, "--version"]).returncode == 0
+
+    def build(items: list[dict]) -> list[dict]:
+        out = []
+        for item in items:
+            argv = [py] + item["args"]
+            out.append({
+                "name": item["name"],
+                "command": " ".join([f'"{py}"'] + item["args"]),
+                "argv": argv,
+                "ok": run([py, "-m", item["module"], "--version"]).returncode == 0,
+            })
+        return out
+
+    return runtime_ok, build(spec["test_runners"]), build(spec["linters"])
+
+
+def _js_candidates(project_root: Path, spec: dict) -> tuple[bool, list[dict], list[dict]]:
+    runtime_ok = shutil.which("node") is not None
+
+    def build(items: list[dict]) -> list[dict]:
+        out = []
+        for item in items:
+            path = find_js_tool(project_root, item["tool"])
+            argv = ([path] if path else ["npx", "--no-install", item["tool"]]) + item["args"]
+            out.append({
+                "name": item["name"],
+                "command": " ".join(["npx", "--no-install", item["tool"]] + item["args"]),
+                "argv": argv,
+                "ok": path is not None,
+            })
+        return out
+
+    return runtime_ok, build(spec["test_runners"]), build(spec["linters"])
+
+
+def _go_candidates(spec: dict) -> tuple[bool, list[dict], list[dict]]:
+    runtime_ok = shutil.which("go") is not None
+
+    def build(items: list[dict]) -> list[dict]:
+        out = []
+        for item in items:
+            argv = [item["tool"]] + item["args"]
+            out.append({
+                "name": item["name"],
+                "command": " ".join(argv),
+                "argv": argv,
+                "ok": shutil.which(item["tool"]) is not None,
+            })
+        return out
+
+    return runtime_ok, build(spec["test_runners"]), build(spec["linters"])
+
+
+def detect_toolchain(project_root: Path) -> dict:
+    """Detect project language and available toolchain. Shared by cmd_detect,
+    cmd_lint, and cmd_lint_hook (no self-subprocess)."""
     detected: list[dict] = []
 
     for lang, spec in TOOLCHAIN_MAP.items():
-        # Check if any config file exists
         config_found = [f for f in spec["config_files"] if (project_root / f).exists()]
         if not config_found:
             continue
 
-        # Check runtime
-        runtime_ok = shell_run(spec["runtime_check"]).returncode == 0
+        if lang == "python":
+            runtime_ok, runner_cands, linter_cands = _python_candidates(project_root, spec)
+        elif lang == "javascript":
+            runtime_ok, runner_cands, linter_cands = _js_candidates(project_root, spec)
+        else:
+            runtime_ok, runner_cands, linter_cands = _go_candidates(spec)
 
-        # Find first available test runner
+        # First available test runner; default to the first candidate if none
         test_runner = None
-        for runner in spec["test_runners"]:
-            if shell_run(runner["check"]).returncode == 0:
-                test_runner = {"name": runner["name"], "command": runner["command"]}
+        for cand in runner_cands:
+            if cand["ok"]:
+                test_runner = {"name": cand["name"], "command": cand["command"], "argv": cand["argv"]}
                 break
-        # If no runner found via check, default to the first one
-        if not test_runner and spec["test_runners"]:
+        if not test_runner and runner_cands:
+            first = runner_cands[0]
             test_runner = {
-                "name": spec["test_runners"][0]["name"],
-                "command": spec["test_runners"][0]["command"],
+                "name": first["name"],
+                "command": first["command"],
+                "argv": first["argv"],
                 "available": False,
             }
 
-        # Find first available linter
+        # First available linter
         linter = None
-        for l in spec["linters"]:
-            if shell_run(l["check"]).returncode == 0:
-                linter = {"name": l["name"], "command": l["command"]}
+        for cand in linter_cands:
+            if cand["ok"]:
+                linter = {"name": cand["name"], "command": cand["command"], "argv": cand["argv"]}
                 break
 
         detected.append({
@@ -374,16 +466,19 @@ def cmd_detect(args: argparse.Namespace) -> None:
         })
 
     if not detected:
-        output = {
+        return {
             "detected": False,
             "languages": [],
             "message": "No supported project configuration found. Looked for: "
                        + ", ".join(f for spec in TOOLCHAIN_MAP.values() for f in spec["config_files"]),
         }
-    else:
-        output = {"detected": True, "languages": detected}
+    return {"detected": True, "languages": detected}
 
-    print(json.dumps(output, indent=2))
+
+def cmd_detect(args: argparse.Namespace) -> None:
+    """Detect project language and available toolchain."""
+    project_root = Path(args.project_root) if args.project_root else Path.cwd()
+    print(json.dumps(detect_toolchain(project_root), indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -413,12 +508,12 @@ def cmd_init(args: argparse.Namespace) -> None:
     private_key, public_key = generate_ephemeral_keypair(issue)
     info(f"Generated ephemeral keypair for issue {issue}")
 
-    # Parse optional requirements and title from --data
-    data = json.loads(args.data) if args.data else {}
+    # Genesis data from discrete flags (quote-safe on every shell; same dict
+    # shape the v1.0.x --data JSON produced)
     genesis_data = {
         "issue": int(issue),
-        "title": data.get("title", ""),
-        "requirements": data.get("requirements", []),
+        "title": args.title or "",
+        "requirements": list(args.requirement or []),
     }
 
     # Build genesis block
@@ -448,24 +543,84 @@ def cmd_init(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Per-action flag contract. Each action builds the exact same data dict shape
+# the v1.0.x --data JSON produced — chain and bundle formats are untouched.
+RECORD_FLAG_SPEC = {
+    "branch-create": {"required": ["branch", "base", "base_sha"], "optional": []},
+    "file-edit": {"required": ["path", "operation"], "optional": []},
+    "decision": {"required": ["context", "choice", "rationale"], "optional": []},
+    "test-result": {"required": ["suite", "passed", "failed"], "optional": ["covers", "failed_test"]},
+    "lint-result": {"required": ["tool", "errors", "warnings"], "optional": []},
+}
+
+_RECORD_DATA_FLAGS = [
+    "branch", "base", "base_sha", "path", "operation",
+    "context", "choice", "rationale",
+    "suite", "passed", "failed", "covers", "failed_test",
+    "tool", "errors", "warnings",
+]
+
+
+def _flag_name(attr: str) -> str:
+    return "--" + attr.replace("_", "-")
+
+
+def _record_data_from_flags(args: argparse.Namespace) -> dict:
+    """Validate the per-action flag set and assemble the block's data dict."""
+    action = args.action
+    spec = RECORD_FLAG_SPEC[action]
+    provided = {f for f in _RECORD_DATA_FLAGS if getattr(args, f, None) is not None}
+    allowed = set(spec["required"]) | set(spec["optional"])
+
+    missing = [_flag_name(f) for f in spec["required"] if f not in provided]
+    extra = [_flag_name(f) for f in sorted(provided - allowed)]
+    if missing or extra:
+        expected = ", ".join(_flag_name(f) for f in spec["required"] + spec["optional"])
+        problems = []
+        if missing:
+            problems.append(f"missing {', '.join(missing)}")
+        if extra:
+            problems.append(f"unexpected {', '.join(extra)}")
+        die(f"action '{action}' takes: {expected} ({'; '.join(problems)})")
+
+    if action == "branch-create":
+        return {"branch": args.branch, "base": args.base, "base_sha": args.base_sha}
+
+    if action == "file-edit":
+        path = Path(args.path)
+        if not path.is_file():
+            die(f"file not found: {args.path} — record a file edit after writing the file")
+        # The engine hashes what is on disk; there is deliberately no override.
+        return {"path": args.path, "operation": args.operation, "sha256": sha256_file(path)}
+
+    if action == "decision":
+        return {"context": args.context, "choice": args.choice, "rationale": args.rationale}
+
+    if action == "test-result":
+        coverage: dict[str, list[str]] = {}
+        for spec_str in args.covers or []:
+            if "=" not in spec_str:
+                die(f"--covers must look like REQ-1=test_a,test_b (got: {spec_str})")
+            req_id, tests = spec_str.split("=", 1)
+            names = [t.strip() for t in tests.split(",") if t.strip()]
+            coverage.setdefault(req_id.strip(), []).extend(names)
+        return {
+            "suite": args.suite,
+            "passed": args.passed,
+            "failed": args.failed,
+            "coverage": coverage,
+            "failed_tests": list(args.failed_test or []),
+        }
+
+    # lint-result
+    return {"tool": args.tool, "errors": args.errors, "warnings": args.warnings}
+
+
 def cmd_record(args: argparse.Namespace) -> None:
     """Record a new block in the chain."""
     issue = args.issue
     chain = load_chain(issue)
-
-    # Parse data
-    try:
-        data = json.loads(args.data)
-    except json.JSONDecodeError as e:
-        die(f"Invalid JSON in --data: {e}")
-
-    # Validate action
-    valid_actions = [
-        "branch-create", "file-edit", "decision",
-        "test-result", "lint-result",
-    ]
-    if args.action not in valid_actions:
-        die(f"Invalid action '{args.action}'. Must be one of: {', '.join(valid_actions)}")
+    data = _record_data_from_flags(args)
 
     last_block = chain[-1]
     key_path = get_key_path(issue)
@@ -509,6 +664,34 @@ def cmd_finalize(args: argparse.Namespace) -> None:
 
     public_key = read_public_key(pub_path)
 
+    # Artifact recheck BEFORE touching the chain: the signed bundle must match
+    # what is on disk at signing time. Only the latest record per path counts
+    # (earlier records of a re-edited file are legitimately superseded).
+    latest_edit: dict[str, str] = {}
+    for block in chain:
+        if block["action"] == "file-edit" and block["data"].get("path"):
+            latest_edit[block["data"]["path"]] = block["data"].get("sha256", "")
+    stale = []
+    missing_files = []
+    for path_str, recorded_hash in latest_edit.items():
+        p = Path(path_str)
+        if not p.is_file():
+            missing_files.append(path_str)
+        elif sha256_file(p) != recorded_hash:
+            stale.append(path_str)
+    if stale or missing_files:
+        problems = []
+        if stale:
+            problems.append("changed on disk since recorded: " + ", ".join(stale))
+        if missing_files:
+            problems.append("missing from disk: " + ", ".join(missing_files))
+        die(
+            "artifact recheck failed — " + "; ".join(problems)
+            + ". Record the current state of each file "
+            "(record --action file-edit --path <file> --operation modify) "
+            "and re-run finalize."
+        )
+
     # Build finalize block
     last_block = chain[-1]
     finalize_data = {
@@ -531,8 +714,11 @@ def cmd_finalize(args: argparse.Namespace) -> None:
     genesis = chain[0]
     issue_data = genesis["data"]
 
-    # Collect artifacts, decisions, and evaluation data from chain
-    artifacts = []
+    # Collect artifacts, decisions, and evaluation data from chain.
+    # Artifacts are deduplicated per path keeping the latest record, so a
+    # re-edited file appears once, with the hash that matches disk at signing
+    # time (the full edit history stays in the chain).
+    artifacts_by_path: dict[str, dict] = {}
     decisions = []
     test_results = []
     lint_results = []
@@ -541,11 +727,11 @@ def cmd_finalize(args: argparse.Namespace) -> None:
         action = block["action"]
         d = block["data"]
         if action == "file-edit":
-            artifacts.append({
+            artifacts_by_path[d.get("path", "")] = {
                 "path": d.get("path", ""),
                 "operation": d.get("operation", ""),
                 "sha256": d.get("sha256", ""),
-            })
+            }
         elif action == "decision":
             decisions.append({
                 "context": d.get("context", ""),
@@ -556,6 +742,8 @@ def cmd_finalize(args: argparse.Namespace) -> None:
             test_results.append(d)
         elif action == "lint-result":
             lint_results.append(d)
+
+    artifacts = list(artifacts_by_path.values())
 
     # Compute evaluation status
     total_passed = sum(t.get("passed", 0) for t in test_results)
@@ -895,34 +1083,101 @@ def cmd_issues(args: argparse.Namespace) -> None:
 
 
 def cmd_lint(args: argparse.Namespace) -> None:
-    """Run the detected linter for the project."""
-    # Detect toolchain
-    detected_output = run([sys.executable, __file__, "detect"])
-    if detected_output.returncode != 0:
-        die("Could not detect project toolchain")
-
-    try:
-        detection = json.loads(detected_output.stdout)
-    except json.JSONDecodeError:
-        die("Invalid detection output")
-
+    """Run the detected linter for the project (or one file via --file)."""
+    detection = detect_toolchain(Path.cwd())
     if not detection.get("detected"):
         die("No supported project configuration found")
 
-    # Run first available linter
+    # Run first available linter — list-form spawn, no shell; output merging
+    # and truncation happen here in Python, not via POSIX tools.
     for lang in detection.get("languages", []):
         linter = lang.get("linter")
-        if linter and linter.get("command"):
-            cmd = linter["command"]
+        if linter and linter.get("argv"):
+            argv = list(linter["argv"])
+            if args.file:
+                if argv[-1] == ".":
+                    argv[-1] = args.file
+                # Project-scope linters (golangci-lint) ignore --file.
             if args.quiet:
-                cmd += " --quiet 2>&1 | head -20"
-            result = shell_run(cmd)
-            print(result.stdout, end="")
-            if result.stderr:
-                print(result.stderr, end="", file=sys.stderr)
+                argv.append("--quiet")
+            result = run(argv)
+            output = (result.stdout or "") + (result.stderr or "")
+            if args.quiet:
+                output = "\n".join(output.splitlines()[:20])
+            if output.strip():
+                print(output.rstrip("\n"))
             sys.exit(result.returncode)
 
     info("No linter available for this project")
+    sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: lint-hook (PostToolUse hook)
+# ---------------------------------------------------------------------------
+
+
+def cmd_lint_hook(_args: argparse.Namespace) -> None:
+    """PostToolUse hook: lint just the edited file during an active run.
+
+    Reads the hook event JSON from stdin. Exits 0 silently unless there is an
+    active chain in the cwd AND the edited file lints with findings, in which
+    case the findings are surfaced to Claude via additionalContext JSON on
+    stdout. Always exits 0 — lint feedback must never block an edit.
+    """
+    try:
+        event = json.loads(sys.stdin.read())
+    except (json.JSONDecodeError, ValueError):
+        sys.exit(0)
+
+    # Session scoping: only active ForgeProof runs pay the lint cost.
+    if not list(CHAIN_DIR.glob("chain-*.json")):
+        sys.exit(0)
+
+    file_path = (event.get("tool_input") or {}).get("file_path") or ""
+    if not file_path:
+        sys.exit(0)
+    target = Path(file_path)
+    if not target.is_file():
+        sys.exit(0)
+    try:
+        rel = target.resolve().relative_to(Path.cwd().resolve())
+    except (ValueError, OSError):
+        sys.exit(0)  # outside the project
+
+    detection = detect_toolchain(Path.cwd())
+    if not detection.get("detected"):
+        sys.exit(0)
+
+    suffix = target.suffix.lower()
+    for lang in detection.get("languages", []):
+        if suffix not in LANG_EXTENSIONS.get(lang["language"], set()):
+            continue
+        linter = lang.get("linter")
+        if not linter or not linter.get("argv"):
+            continue
+        argv = list(linter["argv"])
+        if argv[-1] != ".":
+            continue  # project-scope-only linter; per-file lint unsupported
+        argv[-1] = str(rel)
+        try:
+            result = run(argv)
+        except OSError:
+            sys.exit(0)
+        findings = ((result.stdout or "") + (result.stderr or "")).strip()
+        if result.returncode != 0 and findings:
+            context = (
+                f"forgeproof lint ({linter['name']}) findings for {rel}:\n"
+                + "\n".join(findings.splitlines()[:20])
+            )
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": context,
+                }
+            }))
+        break
+
     sys.exit(0)
 
 
@@ -1003,8 +1258,8 @@ def cmd_gate_pr(_args: argparse.Namespace) -> None:
 
     print(
         "BLOCK: No .rpack bundle found in .forgeproof/. "
-        "Run /forgeproof first to generate a provenance bundle, "
-        "then use /forgeproof-push to create the PR.",
+        "Run /forgeproof:run first to generate a provenance bundle, "
+        "then use /forgeproof:push to create the PR.",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -1013,6 +1268,22 @@ def cmd_gate_pr(_args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
+
+
+class _RemovedDataFlag(argparse.Action):
+    """--data was the v1.0.x quoted-JSON surface; it breaks on any shell when
+    a value contains quotes. Fail loudly with the migration mapping."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.error(
+            "--data was removed in v1.1.0; recording uses discrete flags now. "
+            "init: --title TEXT --requirement 'REQ-1: text' (repeatable). "
+            "record: branch-create --branch --base --base-sha | "
+            "file-edit --path --operation (sha256 is computed by the engine) | "
+            "decision --context --choice --rationale | "
+            "test-result --suite --passed --failed [--covers 'REQ-1=test_a,test_b'] [--failed-test NAME] | "
+            "lint-result --tool --errors --warnings"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1032,14 +1303,42 @@ def build_parser() -> argparse.ArgumentParser:
     # init
     p = sub.add_parser("init", help="Initialize chain for an issue")
     p.add_argument("--issue", required=True, help="Issue number")
-    p.add_argument("--data", help="JSON with title and requirements")
+    p.add_argument("--title", help="Issue title")
+    p.add_argument("--requirement", action="append", metavar="'REQ-1: text'",
+                   help="Requirement (repeatable)")
     p.add_argument("--force", action="store_true", help="Overwrite existing chain")
+    p.add_argument("--data", action=_RemovedDataFlag, help=argparse.SUPPRESS)
 
     # record
     p = sub.add_parser("record", help="Record a block in the chain")
     p.add_argument("--issue", required=True, help="Issue number")
-    p.add_argument("--action", required=True, help="Action type")
-    p.add_argument("--data", required=True, help="JSON data for the block")
+    p.add_argument("--action", required=True, choices=sorted(RECORD_FLAG_SPEC),
+                   help="Action type")
+    p.add_argument("--data", action=_RemovedDataFlag, help=argparse.SUPPRESS)
+    # branch-create
+    p.add_argument("--branch", help="[branch-create] Branch name")
+    p.add_argument("--base", help="[branch-create] Base branch name")
+    p.add_argument("--base-sha", help="[branch-create] Base branch commit SHA")
+    # file-edit
+    p.add_argument("--path", help="[file-edit] File path (engine computes its SHA-256)")
+    p.add_argument("--operation", choices=["create", "modify"],
+                   help="[file-edit] Operation")
+    # decision
+    p.add_argument("--context", help="[decision] What was being decided")
+    p.add_argument("--choice", help="[decision] What was chosen")
+    p.add_argument("--rationale", help="[decision] Why")
+    # test-result
+    p.add_argument("--suite", help="[test-result] Test suite name")
+    p.add_argument("--passed", type=int, help="[test-result] Tests passed")
+    p.add_argument("--failed", type=int, help="[test-result] Tests failed")
+    p.add_argument("--covers", action="append", metavar="'REQ-1=test_a,test_b'",
+                   help="[test-result] Requirement coverage (repeatable)")
+    p.add_argument("--failed-test", action="append", metavar="NAME",
+                   help="[test-result] Name of a failing test (repeatable)")
+    # lint-result
+    p.add_argument("--tool", help="[lint-result] Linter name")
+    p.add_argument("--errors", type=int, help="[lint-result] Error count")
+    p.add_argument("--warnings", type=int, help="[lint-result] Warning count")
 
     # finalize
     p = sub.add_parser("finalize", help="Finalize chain and build .rpack")
@@ -1062,6 +1361,10 @@ def build_parser() -> argparse.ArgumentParser:
     # lint
     p = sub.add_parser("lint", help="Run detected linter")
     p.add_argument("--quiet", action="store_true", help="Minimal output")
+    p.add_argument("--file", help="Lint a single file instead of the project")
+
+    # lint-hook (consumes hook event JSON on stdin; no flags)
+    sub.add_parser("lint-hook", help="PostToolUse per-file lint hook")
 
     # reset
     p = sub.add_parser("reset", help="Clean up ForgeProof state")
@@ -1093,6 +1396,7 @@ def main() -> None:
         "summary": cmd_summary,
         "issues": cmd_issues,
         "lint": cmd_lint,
+        "lint-hook": cmd_lint_hook,
         "reset": cmd_reset,
         "gate-pr": cmd_gate_pr,
     }
