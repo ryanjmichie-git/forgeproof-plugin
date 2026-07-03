@@ -16,7 +16,11 @@ allowed-tools:
 
 Remove ForgeProof artifacts and optionally delete branches for a fresh run.
 
-The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py`.
+The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py`
+(referenced as `$FP` below). Determine the Python interpreter once: run
+`python3 --version`; if that fails or reports Python is not found, use
+`python`. Set `$FP_PY` to whichever succeeded. The examples use bash syntax;
+if your shell is PowerShell, adapt the invocation (`& $FP_PY $FP ...`).
 
 ## Step 1 — Determine scope
 
@@ -28,12 +32,12 @@ If `$ARGUMENTS` is `--all` or empty, clean up all ForgeProof state.
 
 For a single issue:
 ```
-python ${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py reset --issue $ISSUE
+"$FP_PY" "$FP" reset --issue $ISSUE
 ```
 
 For all issues:
 ```
-python ${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py reset --all
+"$FP_PY" "$FP" reset --all
 ```
 
 ## Step 3 — Clean up git branches

@@ -15,7 +15,11 @@ allowed-tools:
 Create a pull request from a completed ForgeProof run with provenance
 metadata embedded in the PR description.
 
-The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py`.
+The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py`
+(referenced as `$FP` below). Determine the Python interpreter once: run
+`python3 --version`; if that fails or reports Python is not found, use
+`python`. Set `$FP_PY` to whichever succeeded. The examples use bash syntax;
+if your shell is PowerShell, adapt the invocation (`& $FP_PY $FP ...`).
 
 ## Step 1 — Identify the ForgeProof branch
 
@@ -63,7 +67,7 @@ git push -u origin forgeproof/$ISSUE
 
 Run the summary command to get the provenance table:
 ```
-python ${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py summary --issue $ISSUE
+"$FP_PY" "$FP" summary --issue $ISSUE
 ```
 
 Build the PR body with this structure:

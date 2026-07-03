@@ -28,11 +28,20 @@ altered after signing.
 The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py`.
 Reference it as `$FP` in all commands below for brevity.
 
+**Interpreter setup (do this once, before anything else):** determine the
+Python interpreter: run `python3 --version`; if that fails or reports that
+Python is not found, run `python --version`. Set `$FP_PY` to whichever
+succeeded and use it for every engine invocation below. The examples below
+use bash syntax (`"$FP_PY" "$FP" <subcommand> ...`); if your shell is
+PowerShell, adapt the invocation (`& $FP_PY $FP <subcommand> ...`) and any
+command substitutions accordingly — execute the intent, not the literal
+bash syntax.
+
 ## Issue Selection
 
 If `$ARGUMENTS` is empty (no issue number provided):
 
-1. Run: `python $FP issues --assignee @me`
+1. Run: `"$FP_PY" "$FP" issues --assignee @me`
 2. Present the list to the user as a numbered list showing issue number, title, and labels
 3. Ask the user to pick one
 4. Set `$ISSUE` to the chosen issue number and continue
@@ -43,14 +52,14 @@ If `$ARGUMENTS` contains an issue number, set `$ISSUE` to that number and contin
 
 Run the dependency check:
 ```
-python $FP preflight
+"$FP_PY" "$FP" preflight
 ```
 
 If any check fails, stop and tell the user exactly what is missing and how to install it. Do not proceed until all checks pass.
 
 Then detect the project toolchain:
 ```
-python $FP detect
+"$FP_PY" "$FP" detect
 ```
 
 Parse the JSON output. Store the detected `test_runner.command` and `linter.command` for use in Phase 3. If no language is detected, ask the user to specify their test command and lint command.
@@ -89,11 +98,13 @@ If missing, warn the user: "No `.gitignore` found. Generated files like `__pycac
 
 ### Initialize and branch
 
-Initialize the provenance chain:
+Initialize the provenance chain (repeat `--requirement` once per requirement):
 ```
-python $FP init --issue $ISSUE --force --data '{"title": "<issue title>", "requirements": ["REQ-1: <text>", "REQ-2: <text>"]}'
+"$FP_PY" "$FP" init --issue $ISSUE --force --title "<issue title>" --requirement "REQ-1: <text>" --requirement "REQ-2: <text>"
 ```
-The `--force` flag safely handles re-runs by cleaning up any prior chain for this issue.
+The `--force` flag safely handles re-runs by cleaning up any prior chain for
+this issue. Pass the title and each requirement as ordinary quoted arguments —
+there is no JSON to escape, so titles containing quotes are safe.
 
 Check for an existing local branch and clean up if needed:
 ```
@@ -112,18 +123,19 @@ git checkout -b forgeproof/$ISSUE origin/main
 ```
 Then record it:
 ```
-python $FP record --issue $ISSUE --action branch-create --data '{"branch": "forgeproof/$ISSUE", "base": "main", "base_sha": "<sha>"}'
+"$FP_PY" "$FP" record --issue $ISSUE --action branch-create --branch forgeproof/$ISSUE --base main --base-sha <sha>
 ```
 
 Implement the changes. After EVERY file you create or modify, record it:
 ```
-python $FP record --issue $ISSUE --action file-edit --data '{"path": "<filepath>", "operation": "create|modify", "sha256": "<hash>"}'
+"$FP_PY" "$FP" record --issue $ISSUE --action file-edit --path <filepath> --operation modify
 ```
-Compute the sha256 with: `sha256sum <filepath> | cut -d' ' -f1`
+Use `--operation create` for new files. The engine computes the file's
+SHA-256 from `--path` itself — do not compute or pass a hash.
 
 Log significant decisions as you work. When you choose an approach, skip an alternative, or make a non-obvious judgment call:
 ```
-python $FP record --issue $ISSUE --action decision --data '{"context": "<what you were deciding>", "choice": "<what you chose>", "rationale": "<why>"}'
+"$FP_PY" "$FP" record --issue $ISSUE --action decision --context "<what you were deciding>" --choice "<what you chose>" --rationale "<why>"
 ```
 
 Write tests that cover each requirement. Record test file creation as file-edit blocks.
@@ -131,7 +143,11 @@ Write tests that cover each requirement. Record test file creation as file-edit 
 ### Rules during generation
 - NEVER skip recording a file edit or decision in the chain
 - NEVER modify `.forgeproof/` files directly — only through the Python scripts
-- Record the sha256 of each file AFTER writing it, not before
+- Record each file AFTER writing it, not before — the engine hashes what is
+  on disk at record time
+- If you edit a file again after recording it, record it again (`--operation
+  modify`); `finalize` refuses to sign if any recorded file no longer matches
+  disk
 - Create focused, minimal changes — do not refactor unrelated code
 
 ## Phase 3 — Evaluate
@@ -141,9 +157,10 @@ Run the test suite using the command detected in Phase 0:
 <detected test command> 2>&1
 ```
 
-Record the results:
+Record the results (repeat `--covers` once per requirement; repeat
+`--failed-test` once per failing test, if any):
 ```
-python $FP record --issue $ISSUE --action test-result --data '{"suite": "<name>", "passed": <N>, "failed": <N>, "coverage": {"REQ-1": ["<test_name>"], "REQ-2": ["<test_name>"]}, "failed_tests": ["<test_name if any>"]}'
+"$FP_PY" "$FP" record --issue $ISSUE --action test-result --suite <name> --passed <N> --failed <N> --covers "REQ-1=<test_name>,<test_name>" --covers "REQ-2=<test_name>"
 ```
 
 Run the linter using the command detected in Phase 0:
@@ -153,7 +170,7 @@ Run the linter using the command detected in Phase 0:
 
 Record lint results:
 ```
-python $FP record --issue $ISSUE --action lint-result --data '{"tool": "<name>", "errors": <N>, "warnings": <N>}'
+"$FP_PY" "$FP" record --issue $ISSUE --action lint-result --tool <name> --errors <N> --warnings <N>
 ```
 
 If tests or linting fail, attempt ONE auto-fix cycle:
@@ -178,14 +195,17 @@ git commit -m "forgeproof(#$ISSUE): <concise description>"
 ```
 
 The file list comes from the `file-edit` records you made during Phase 2. Stage each
-file path that appeared in a `--action file-edit --data '{"path": "..."}'` call.
+file path that appeared in a `--action file-edit --path ...` call.
 
 Finalize the chain and build the `.rpack` bundle:
 ```
-python $FP finalize --issue $ISSUE --commit $(git rev-parse HEAD)
+"$FP_PY" "$FP" finalize --issue $ISSUE --commit $(git rev-parse HEAD)
 ```
 
 This command:
+- Re-checks every recorded file against disk — if any file changed after it
+  was recorded, finalize refuses to sign and names the stale paths; record
+  the current state of each named file (`--action file-edit`) and re-run
 - Adds a finalize block to the chain
 - Builds the `.rpack` bundle with all artifacts, requirements, decisions, and evaluation data
 - Signs the bundle with the ephemeral Ed25519 key

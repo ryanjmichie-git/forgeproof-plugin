@@ -1200,11 +1200,6 @@ class TestSkillContract:
     the real argparse surface — a stale example is a loud CI failure, not a
     silent runtime break inside a Claude session."""
 
-    @pytest.mark.xfail(
-        reason="SKILL.md examples still use the removed v1.0.x --data surface; "
-               "rewritten in the skill-instructions phase of the v1.1.0 release",
-        strict=True,
-    )
     def test_skill_examples_parse(self, capsys):
         failures = []
         checked = 0
