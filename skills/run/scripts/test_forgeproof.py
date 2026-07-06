@@ -129,6 +129,53 @@ class TestCanonicalJson:
 
 
 # ---------------------------------------------------------------------------
+# cmd_preflight tests
+# ---------------------------------------------------------------------------
+
+
+class TestCmdPreflight:
+    def test_preflight_never_spawns_sshkeygen(self, capsys, monkeypatch):
+        """Regression: preflight used to call `ssh-keygen -h`, which is NOT a
+        help flag — it starts interactive key generation and blocks forever
+        on its stdin prompt (froze live sessions for minutes while Claude
+        Code backgrounded and retried it). ssh-keygen availability must come
+        from a PATH lookup only."""
+        def fake_run(cmd, **kwargs):
+            assert cmd[0] != "ssh-keygen", (
+                "preflight must not spawn ssh-keygen — PATH lookup only")
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="gh version 2.0.0\n", stderr="")
+
+        monkeypatch.setattr(fp, "run", fake_run)
+        monkeypatch.setattr(fp.shutil, "which", lambda name: f"/usr/bin/{name}")
+        with pytest.raises(SystemExit) as exc_info:
+            fp.cmd_preflight(MagicMock())
+        assert exc_info.value.code == 0
+        out = json.loads(capsys.readouterr().out)
+        checks = {c["dependency"]: c for c in out["checks"]}
+        assert checks["ssh-keygen"]["ok"] is True
+
+    def test_run_closes_stdin_by_default(self, monkeypatch):
+        """No engine subprocess may inherit an open stdin — any child that
+        prompts interactively would hang the whole hook/skill invocation."""
+        captured = {}
+
+        def fake_subprocess_run(cmd, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(fp.subprocess, "run", fake_subprocess_run)
+        fp.run(["anything"])
+        assert captured.get("stdin") == subprocess.DEVNULL
+        # Callers that feed stdin via input= must still work (subprocess.run
+        # forbids combining stdin= and input=)
+        fp.run(["anything"], input="data")
+        assert "stdin" not in captured
+        assert captured.get("input") == "data"
+
+
+# ---------------------------------------------------------------------------
 # Chain operation tests
 # ---------------------------------------------------------------------------
 

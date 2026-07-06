@@ -38,6 +38,12 @@ Linux with no `python` symlink. Bundle format unchanged — every v1.0.x
 
 ### Fixed
 
+- **`preflight` could hang forever.** It probed ssh-keygen with
+  `ssh-keygen -h`, which is not a help flag — it starts *interactive key
+  generation* and blocks on a stdin prompt (observed freezing live sessions
+  for minutes). The probe is removed (availability is a PATH lookup) and
+  every engine subprocess now runs with stdin closed, so no child can ever
+  block waiting for interactive input.
 - **PR gate now covers the PowerShell tool.** Claude Code on Windows exposes
   a first-class PowerShell tool alongside Bash; the v1.0.x matcher (`Bash`)
   and the gate's tool check let `gh pr create` through PowerShell bypass the

@@ -83,7 +83,14 @@ def info(msg: str) -> None:
 
 
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
-    """Run a subprocess, returning the result."""
+    """Run a subprocess, returning the result.
+
+    stdin is closed by default so no child can ever block waiting for
+    interactive input (a hung ssh-keygen prompt froze preflight for minutes
+    inside Claude Code sessions). Callers that feed stdin pass input=.
+    """
+    if "input" not in kwargs:
+        kwargs.setdefault("stdin", subprocess.DEVNULL)
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
 
@@ -260,9 +267,10 @@ def cmd_preflight(_args: argparse.Namespace) -> None:
         "install": "Run: gh auth login",
     })
 
-    # ssh-keygen
-    result = run(["ssh-keygen", "-h"])
-    # ssh-keygen -h exits non-zero but outputs to stderr; check if binary exists
+    # ssh-keygen: availability via PATH lookup ONLY. Never spawn a bare
+    # ssh-keygen probe — `-h` is not a help flag (it means "host certificate")
+    # and invoking it starts INTERACTIVE key generation that blocks forever
+    # on a stdin prompt.
     has_sshkeygen = shutil.which("ssh-keygen") is not None
     checks.append({
         "dependency": "ssh-keygen",
