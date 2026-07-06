@@ -66,6 +66,34 @@ def canonical_json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
+def read_json_file(path: Path, what: str) -> Any:
+    """Load JSON from a file, dying cleanly on any read/parse failure.
+
+    Every on-disk chain/bundle read goes through here so a truncated, empty,
+    BOM-prefixed, or otherwise corrupt file produces an actionable error
+    instead of a raw traceback.
+    """
+    try:
+        text = path.read_text(encoding="utf-8-sig")  # tolerate a UTF-8 BOM
+    except OSError as e:
+        die(f"cannot read {what} ({path}): {e}")
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError) as e:
+        die(f"{what} is not valid JSON ({path}): {e}")
+
+
+def is_canonical_issue(issue: str) -> bool:
+    """A canonical issue number is ASCII decimal with no leading zeros, so the
+    string used for filenames and the int stored in the bundle always agree
+    (guards a false-green where a tampered chain-007.json is never checked
+    because the bundle records issue 7)."""
+    s = str(issue)
+    if not (s.isascii() and s.isdigit()):
+        return False
+    return s == "0" or not s.startswith("0")
+
+
 def now_iso() -> str:
     """Current UTC time in ISO 8601."""
     return datetime.now(timezone.utc).isoformat()
@@ -188,7 +216,7 @@ def load_chain(issue: str) -> list[dict]:
     path = chain_path(issue)
     if not path.exists():
         die(f"No chain found for issue {issue}. Run 'init' first.")
-    return json.loads(path.read_text())
+    return read_json_file(path, f"chain for issue {issue}")
 
 
 def save_chain(issue: str, chain: list[dict]) -> None:
@@ -497,9 +525,18 @@ def cmd_detect(args: argparse.Namespace) -> None:
 def cmd_init(args: argparse.Namespace) -> None:
     """Initialize a provenance chain for an issue."""
     issue = args.issue
-    # Validate before any side effect (keypair generation writes temp files)
-    if not str(issue).isdigit():
-        die(f"--issue must be a number (got: {issue})")
+    # Validate before any side effect (keypair generation writes temp files).
+    # Canonical = ASCII decimal, no leading zeros, so the filename string and
+    # the int stored in the bundle can never disagree.
+    if not is_canonical_issue(issue):
+        die(f"--issue must be a canonical number (ASCII digits, no leading "
+            f"zeros), e.g. 7 not 007 (got: {issue!r})")
+    # Requirements must carry a 'REQ-N: text' colon; a colonless requirement
+    # would be silently dropped at finalize and inflate coverage to 100%.
+    for req in args.requirement or []:
+        if ":" not in req:
+            die(f"--requirement must look like 'REQ-1: text' (missing ':' "
+                f"in {req!r})")
     path = chain_path(issue)
 
     if path.exists():
@@ -598,11 +635,28 @@ def _record_data_from_flags(args: argparse.Namespace) -> dict:
         return {"branch": args.branch, "base": args.base, "base_sha": args.base_sha}
 
     if action == "file-edit":
-        path = Path(args.path)
-        if not path.is_file():
-            die(f"file not found: {args.path} — record a file edit after writing the file")
+        raw = args.path
+        path = Path(raw)
+        # The recorded path must be repo-relative and inside the project: verify
+        # later resolves it relative to the checkout, so an absolute path (or one
+        # escaping the root) would verify GREEN on a reviewer's machine even if
+        # the file there was modified — the artifact simply "isn't found". Store
+        # a normalized forward-slash relative path so re-edits of the same file
+        # dedup to one artifact regardless of spelling.
+        if path.is_absolute() or (len(raw) >= 2 and raw[1] == ":"):
+            die(f"--path must be relative to the project root, not absolute: {raw!r}")
+        root = Path.cwd().resolve()
+        try:
+            resolved = (root / path).resolve()
+            rel = resolved.relative_to(root)
+        except (ValueError, OSError):
+            die(f"--path must stay inside the project root: {raw!r}")
+        if not resolved.is_file():
+            die(f"file not found: {raw} — record a file edit after writing the file")
+        rel_str = rel.as_posix()
         # The engine hashes what is on disk; there is deliberately no override.
-        return {"path": args.path, "operation": args.operation, "sha256": sha256_file(path)}
+        return {"path": rel_str, "operation": args.operation,
+                "sha256": sha256_file(resolved)}
 
     if action == "decision":
         return {"context": args.context, "choice": args.choice, "rationale": args.rationale}
@@ -688,8 +742,14 @@ def cmd_finalize(args: argparse.Namespace) -> None:
         p = Path(path_str)
         if not p.is_file():
             missing_files.append(path_str)
-        elif sha256_file(p) != recorded_hash:
-            stale.append(path_str)
+        else:
+            try:
+                current = sha256_file(p)
+            except OSError:
+                missing_files.append(path_str)  # unreadable == can't attest
+                continue
+            if current != recorded_hash:
+                stale.append(path_str)
     if stale or missing_files:
         problems = []
         if stale:
@@ -880,10 +940,12 @@ def cmd_finalize(args: argparse.Namespace) -> None:
 def cmd_verify(args: argparse.Namespace) -> None:
     """Verify a .rpack bundle's integrity."""
     rpack_path = Path(args.rpack)
-    if not rpack_path.exists():
-        die(f"Bundle not found: {rpack_path}")
+    if not rpack_path.is_file():
+        die(f"Bundle not found (or not a file): {rpack_path}")
 
-    bundle = json.loads(rpack_path.read_text())
+    bundle = read_json_file(rpack_path, "bundle")
+    if not isinstance(bundle, dict):
+        die(f"bundle is not a JSON object: {rpack_path}")
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -920,15 +982,17 @@ def cmd_verify(args: argparse.Namespace) -> None:
     # 4. Verify chain hash
     issue_num = str(bundle.get("issue", {}).get("number", ""))
     chain_file = chain_path(issue_num)
-    if chain_file.exists():
+    if chain_file.is_file():
         actual_chain_hash = sha256_hex(chain_file.read_text())
         if actual_chain_hash != bundle.get("chain_hash"):
             errors.append(f"Chain hash mismatch: chain file has been modified since bundle was signed")
         else:
             info("Chain hash: OK")
 
-        # 5. Verify chain integrity (block linkage)
-        chain = json.loads(chain_file.read_text())
+        # 5. Verify chain integrity (block linkage). A corrupt chain that still
+        # matched chain_hash is impossible, but a corrupt chain alongside an
+        # intact bundle must fail closed, not traceback.
+        chain = read_json_file(chain_file, f"chain for issue {issue_num}")
         for i, block in enumerate(chain):
             if i == 0:
                 if block["prev_hash"] != GENESIS_PREV_HASH:
@@ -956,12 +1020,23 @@ def cmd_verify(args: argparse.Namespace) -> None:
     artifacts_tampered = 0
     for artifact in bundle.get("artifacts", []):
         artifact_path = Path(artifact["path"])
-        if artifact_path.exists():
-            actual_hash = sha256_file(artifact_path)
+        if artifact_path.is_file():
+            try:
+                actual_hash = sha256_file(artifact_path)
+            except OSError as e:
+                # Unreadable (locked, permission) — can't confirm integrity,
+                # so it's an error, never a crash.
+                errors.append(f"Artifact unreadable: {artifact['path']} ({e})")
+                artifacts_tampered += 1
+                continue
             if actual_hash != artifact["sha256"]:
                 errors.append(f"Artifact tampered: {artifact['path']} hash mismatch")
                 artifacts_tampered += 1
             artifacts_checked += 1
+        elif artifact_path.exists():
+            # Path exists but is not a regular file (e.g. replaced by a dir).
+            errors.append(f"Artifact is not a file: {artifact['path']}")
+            artifacts_tampered += 1
         else:
             warnings.append(f"Artifact not found: {artifact['path']}")
             artifacts_missing += 1
@@ -1003,10 +1078,10 @@ def cmd_summary(args: argparse.Namespace) -> None:
     issue = args.issue
     rpack_path = CHAIN_DIR / f"issue-{issue}.rpack"
 
-    if not rpack_path.exists():
+    if not rpack_path.is_file():
         die(f"No .rpack bundle found for issue {issue}. Run 'finalize' first.")
 
-    bundle = json.loads(rpack_path.read_text())
+    bundle = read_json_file(rpack_path, "bundle")
     issue_info = bundle["issue"]
     evaluation = bundle["evaluation"]
     reqs = bundle["requirements"]
@@ -1140,13 +1215,16 @@ def cmd_lint_hook(_args: argparse.Namespace) -> None:
         event = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, ValueError):
         sys.exit(0)
+    if not isinstance(event, dict):
+        sys.exit(0)  # well-formed JSON of the wrong shape must never crash
 
     # Session scoping: only active ForgeProof runs pay the lint cost.
     if not list(CHAIN_DIR.glob("chain-*.json")):
         sys.exit(0)
 
-    file_path = (event.get("tool_input") or {}).get("file_path") or ""
-    if not file_path:
+    tool_input = event.get("tool_input")
+    file_path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+    if not isinstance(file_path, str) or not file_path:
         sys.exit(0)
     target = Path(file_path)
     if not target.is_file():
@@ -1262,10 +1340,18 @@ def cmd_gate_pr(_args: argparse.Namespace) -> None:
         event = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, ValueError):
         sys.exit(0)
+    if not isinstance(event, dict):
+        sys.exit(0)  # well-formed JSON of the wrong shape must never crash
 
-    tool = event.get("tool_name", "")
-    cmd = event.get("tool_input", {}).get("command", "")
+    tool = event.get("tool_name")
+    tool_input = event.get("tool_input")
+    cmd = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(cmd, str):
+        cmd = ""
 
+    # The gate blocks only on a positively-identified 'gh pr create'; anything
+    # it cannot interpret is allowed (consistent with the unparseable case),
+    # but it must decide that WITHOUT crashing.
     if tool not in ("Bash", "PowerShell") or "gh pr create" not in cmd:
         sys.exit(0)
 

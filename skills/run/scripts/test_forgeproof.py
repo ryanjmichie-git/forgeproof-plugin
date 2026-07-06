@@ -321,8 +321,37 @@ class TestCmdInit:
                           side_effect=AssertionError("keygen must not run")):
             with pytest.raises(SystemExit):
                 fp.cmd_init(self._make_args(issue="not-a-number"))
-        assert "--issue must be a number" in capsys.readouterr().err
+        assert "--issue must be a canonical number" in capsys.readouterr().err
         assert list(_isolated_system_temp.iterdir()) == []
+
+    def test_init_rejects_leading_zero_issue(self, tmp_chain_dir, capsys):
+        """Leading-zero issue numbers made the filename ('007') and the bundle
+        int (7) disagree, so a tampered chain was never checked -> false green.
+        Reject non-canonical numbers before any side effect."""
+        with patch.object(fp, "generate_ephemeral_keypair",
+                          side_effect=AssertionError("keygen must not run")):
+            with pytest.raises(SystemExit):
+                fp.cmd_init(self._make_args(issue="007"))
+        assert "canonical" in capsys.readouterr().err
+
+    def test_init_rejects_unicode_digit_issue(self, tmp_chain_dir, capsys):
+        """'³'/'①' pass str.isdigit() but crash int(); must be rejected
+        cleanly before the keypair is generated."""
+        with patch.object(fp, "generate_ephemeral_keypair",
+                          side_effect=AssertionError("keygen must not run")):
+            with pytest.raises(SystemExit):
+                fp.cmd_init(self._make_args(issue="³"))
+        assert "canonical" in capsys.readouterr().err
+
+    def test_init_rejects_colonless_requirement(self, tmp_chain_dir, capsys):
+        """A requirement without a colon was silently dropped at finalize and
+        inflated coverage to 100%/pass; reject it at init."""
+        with patch.object(fp, "generate_ephemeral_keypair",
+                          side_effect=AssertionError("keygen must not run")):
+            with pytest.raises(SystemExit):
+                fp.cmd_init(self._make_args(
+                    issue="1", requirements=("REQ-1 no colon here",)))
+        assert "REQ-1: text" in capsys.readouterr().err
 
     def test_init_genesis_block_structure(self, tmp_chain_dir):
         keygen_patch, sign_patch = self._mock_keygen_and_sign(tmp_chain_dir)
@@ -368,18 +397,50 @@ class TestCmdRecord:
         with patch.object(fp, "get_key_path", return_value=None), patch("sys.stdout"):
             fp.cmd_record(self._parse(*argv))
 
-    def test_record_appends_block(self, sample_chain, tmp_chain_dir, tmp_path):
+    def test_record_appends_block(self, sample_chain, tmp_chain_dir, tmp_path,
+                                   monkeypatch):
         issue, chain = sample_chain
+        monkeypatch.chdir(tmp_path)
         f = tmp_path / "test.py"
         f.write_text("print('x')\n")
         self._record("--issue", issue, "--action", "file-edit",
-                     "--path", str(f), "--operation", "create")
+                     "--path", "test.py", "--operation", "create")
 
         loaded = fp.load_chain(issue)
         assert len(loaded) == 2
         assert loaded[1]["action"] == "file-edit"
+        assert loaded[1]["data"]["path"] == "test.py"
         # The engine computed the hash natively — no shell, no sha256sum
         assert loaded[1]["data"]["sha256"] == fp.sha256_file(f)
+
+    def test_record_rejects_absolute_path(self, sample_chain, tmp_chain_dir,
+                                          tmp_path, monkeypatch, capsys):
+        """An absolute --path verifies GREEN on any other checkout even if the
+        file there was modified (verify resolves it relative to cwd and just
+        reports 'not found'). Reject absolute paths at record time."""
+        issue, _ = sample_chain
+        monkeypatch.chdir(tmp_path)
+        f = tmp_path / "abs.py"
+        f.write_text("x = 1\n")
+        with pytest.raises(SystemExit):
+            self._record("--issue", issue, "--action", "file-edit",
+                         "--path", str(f), "--operation", "create")
+        assert "must be relative" in capsys.readouterr().err
+
+    def test_record_normalizes_path_spelling(self, sample_chain, tmp_chain_dir,
+                                             tmp_path, monkeypatch):
+        """Different spellings of one physical file must dedup to one artifact:
+        record stores a normalized forward-slash relative path."""
+        issue, _ = sample_chain
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "x.py").write_text("y = 1\n")
+        for spelling in ("src/x.py", "src/../src/x.py", "./src/x.py"):
+            self._record("--issue", issue, "--action", "file-edit",
+                         "--path", spelling, "--operation", "modify")
+        paths = {b["data"]["path"] for b in fp.load_chain(issue)
+                 if b["action"] == "file-edit"}
+        assert paths == {"src/x.py"}, f"path not normalized: {paths}"
 
     def test_record_increments_index(self, sample_chain, tmp_chain_dir):
         issue, chain = sample_chain
@@ -423,8 +484,10 @@ class TestCmdRecordFlags:
             fp.cmd_record(fp.build_parser().parse_args(
                 ["record", "--issue", issue, *argv]))
 
-    def test_shapes_match_v101_literals(self, sample_chain, tmp_chain_dir, tmp_path):
+    def test_shapes_match_v101_literals(self, sample_chain, tmp_chain_dir,
+                                        tmp_path, monkeypatch):
         issue, _ = sample_chain
+        monkeypatch.chdir(tmp_path)
         f = tmp_path / "x.py"
         f.write_text("y = 1\n")
         cases = [
@@ -434,8 +497,8 @@ class TestCmdRecordFlags:
                 {"branch": "forgeproof/1", "base": "main", "base_sha": "abc123"},
             ),
             (
-                ["--action", "file-edit", "--path", str(f), "--operation", "create"],
-                {"path": str(f), "operation": "create", "sha256": fp.sha256_file(f)},
+                ["--action", "file-edit", "--path", "x.py", "--operation", "create"],
+                {"path": "x.py", "operation": "create", "sha256": fp.sha256_file(f)},
             ),
             (
                 ["--action", "decision", "--context", "ctx",
@@ -1083,6 +1146,84 @@ class TestDetectPortable:
 
 
 # ---------------------------------------------------------------------------
+# Malformed-input robustness (clean die / fail-safe, never a traceback)
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedInputRobustness:
+    """Adversarial stress found raw tracebacks on corrupt files and wrong-shape
+    hook events. Every entry point must die cleanly or fail safe."""
+
+    def _cli(self, cwd, *args, stdin=None):
+        return subprocess.run(
+            [sys.executable, str(FORGEPROOF_PY), *args], cwd=cwd,
+            input=stdin, capture_output=True, text=True, timeout=60)
+
+    def _no_traceback(self, result):
+        assert "Traceback (most recent call last)" not in result.stderr, (
+            f"raw traceback leaked:\n{result.stderr}")
+
+    @pytest.mark.parametrize("content", ["", "   ", "{ truncated", "not json",
+                                         "﻿{}", "[]"])
+    def test_verify_malformed_rpack_dies_clean(self, tmp_path, content):
+        rpack = tmp_path / "bad.rpack"
+        rpack.write_text(content, encoding="utf-8")
+        r = self._cli(tmp_path, "verify", "--rpack", "bad.rpack")
+        self._no_traceback(r)
+        assert r.returncode != 0
+
+    def test_verify_rpack_is_a_directory_dies_clean(self, tmp_path):
+        (tmp_path / "adir.rpack").mkdir()
+        r = self._cli(tmp_path, "verify", "--rpack", "adir.rpack")
+        self._no_traceback(r)
+        assert r.returncode != 0
+
+    def test_verify_corrupt_chain_beside_intact_bundle_fails_closed(self, tmp_path):
+        """A real signed bundle whose chain file is later corrupted must fail
+        closed with a clean message, not traceback."""
+        fixture = FIXTURE_V101
+        cd = tmp_path / ".forgeproof"
+        cd.mkdir()
+        shutil.copyfile(fixture / "issue-999.rpack", cd / "issue-999.rpack")
+        (cd / "chain-999.json").write_text("{ corrupt", encoding="utf-8")
+        (tmp_path / "src").mkdir()
+        shutil.copyfile(fixture / "src" / "example.py", tmp_path / "src" / "example.py")
+        r = self._cli(tmp_path, "verify", "--rpack", ".forgeproof/issue-999.rpack")
+        self._no_traceback(r)
+        assert r.returncode != 0
+
+    @pytest.mark.parametrize("event", ["42", '"hello"', '["x"]', "null",
+                                       '{"tool_input": "notadict"}',
+                                       '{"tool_name": "Bash", "tool_input": {"command": 5}}'])
+    def test_gate_wrong_shape_event_never_crashes(self, tmp_path, event):
+        r = self._cli(tmp_path, "gate-pr", stdin=event)
+        self._no_traceback(r)
+        # No positively-identified gh pr create -> allow (exit 0), never crash
+        assert r.returncode == 0
+
+    @pytest.mark.parametrize("event", ["42", '"hello"', '["x"]', "null",
+                                       '{"tool_input": {"file_path": 123}}',
+                                       '{"tool_input": {"file_path": ["a.js"]}}'])
+    def test_lint_hook_wrong_shape_event_always_exit_0(self, tmp_path, event):
+        (tmp_path / ".forgeproof").mkdir()
+        (tmp_path / ".forgeproof" / "chain-1.json").write_text("[]", encoding="utf-8")
+        r = self._cli(tmp_path, "lint-hook", stdin=event)
+        self._no_traceback(r)
+        assert r.returncode == 0
+        assert r.stdout.strip() == ""
+
+    def test_record_on_corrupt_chain_dies_clean(self, tmp_path):
+        cd = tmp_path / ".forgeproof"
+        cd.mkdir()
+        (cd / "chain-5.json").write_text("{ truncated", encoding="utf-8")
+        r = self._cli(tmp_path, "record", "--issue", "5", "--action", "decision",
+                      "--context", "a", "--choice", "b", "--rationale", "c")
+        self._no_traceback(r)
+        assert r.returncode != 0
+        assert "not valid JSON" in r.stderr
+
+
+# ---------------------------------------------------------------------------
 # Hooks configuration (the loud PR-gate regression test)
 # ---------------------------------------------------------------------------
 
@@ -1326,12 +1467,13 @@ class TestSkillContract:
     the real argparse surface — a stale example is a loud CI failure, not a
     silent runtime break inside a Claude session."""
 
-    def test_skill_examples_parse(self, capsys, tmp_path):
+    def test_skill_examples_parse(self, capsys, tmp_path, monkeypatch):
         """Two levels: argparse must accept the example, and for `record`
         the per-action runtime validation must accept it too (an example
         that parses but dies in _record_data_from_flags is just as broken)."""
-        stand_in_file = tmp_path / "example-artifact.py"
-        stand_in_file.write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)  # documented paths are repo-relative
+        stand_in = "example-artifact.py"
+        (tmp_path / stand_in).write_text("x = 1\n")
         failures = []
         checked = 0
         for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
@@ -1341,7 +1483,7 @@ class TestSkillContract:
                     ns = fp.build_parser().parse_args(argv)
                     if ns.command == "record":
                         if ns.path is not None:
-                            ns.path = str(stand_in_file)
+                            ns.path = stand_in
                         fp._record_data_from_flags(ns)
                 except SystemExit as e:
                     if e.code not in (0, None):
@@ -1506,11 +1648,12 @@ class TestEndToEnd:
     Requires ssh-keygen on PATH. Skip with: pytest -m 'not integration'
     """
 
-    def test_full_pipeline(self, tmp_chain_dir, tmp_path, capsys):
+    def test_full_pipeline(self, tmp_chain_dir, tmp_path, capsys, monkeypatch):
         if not shutil.which("ssh-keygen"):
             pytest.skip("ssh-keygen not available")
 
         issue = "42"
+        monkeypatch.chdir(tmp_path)  # artifacts are recorded repo-relative
 
         # Create a source file to reference as an artifact
         src = tmp_path / "src"
@@ -1538,7 +1681,7 @@ class TestEndToEnd:
 
         # 3. Record file-edit (engine hashes the file natively)
         record("--action", "file-edit",
-               "--path", str(test_file), "--operation", "create")
+               "--path", "src/hello.py", "--operation", "create")
 
         # 4. Record test-result
         record("--action", "test-result", "--suite", "pytest",

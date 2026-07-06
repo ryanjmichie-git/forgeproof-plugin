@@ -521,6 +521,73 @@ def scenario_large(rec: Recorder, interp_name: str, exe: str, proj: Path) -> Non
     c("large: 50 artifacts among 500 files, recheck+verify within budget", fn)
 
 
+def scenario_validation(rec: Recorder, interp_name: str, exe: str,
+                        proj: Path) -> None:
+    """Cross-platform input hardening (path semantics differ per OS)."""
+    scenario = "re-edit-heavy"  # reuse a project dir with a real file
+    (proj / "src").mkdir(parents=True, exist_ok=True)
+    (proj / "src" / "churn.py").write_text("STATE = 0\n", encoding="utf-8")
+
+    def c(name, fn):
+        run_check(rec, "validation", interp_name, name, fn)
+
+    def fn_leading_zero():
+        p = engine(exe, ["init", "--issue", "007", "--force", "--title", "t",
+                         "--requirement", "REQ-1: x"], proj)
+        expect(p.returncode != 0, "leading-zero issue must be rejected")
+        expect("canonical" in p.stderr, f"wrong error: {p.stderr[:150]}")
+    c("init: rejects leading-zero issue (false-green guard)", fn_leading_zero)
+
+    def fn_colonless():
+        p = engine(exe, ["init", "--issue", "9400", "--force", "--title", "t",
+                         "--requirement", "REQ-1 no colon"], proj)
+        expect(p.returncode != 0, "colonless requirement must be rejected")
+    c("init: rejects colonless requirement (coverage-inflation guard)", fn_colonless)
+
+    def fn_abs_path():
+        engine(exe, ["init", "--issue", "9401", "--force", "--title", "t",
+                     "--requirement", "REQ-1: x"], proj)
+        abs_path = str((proj / "src" / "churn.py").resolve())
+        p = engine(exe, ["record", "--issue", "9401", "--action", "file-edit",
+                         "--path", abs_path, "--operation", "create"], proj)
+        expect(p.returncode != 0, "absolute --path must be rejected")
+        expect("relative" in p.stderr, f"wrong error: {p.stderr[:150]}")
+        engine(exe, ["reset", "--issue", "9401"], proj)
+    c("record: rejects absolute --path (cross-checkout false-green guard)", fn_abs_path)
+
+    def fn_path_norm():
+        engine(exe, ["init", "--issue", "9402", "--force", "--title", "t",
+                     "--requirement", "REQ-1: x"], proj)
+        for spelling in ("src/churn.py", "./src/churn.py", "src/../src/churn.py"):
+            p = engine(exe, ["record", "--issue", "9402", "--action", "file-edit",
+                             "--path", spelling, "--operation", "modify"], proj)
+            expect(p.returncode == 0, f"record {spelling} rc={p.returncode}")
+        chain = json.loads(
+            (proj / ".forgeproof" / "chain-9402.json").read_text(encoding="utf-8"))
+        paths = {b["data"]["path"] for b in chain if b["action"] == "file-edit"}
+        expect(paths == {"src/churn.py"},
+               f"path spellings not normalized to one: {paths}")
+        engine(exe, ["reset", "--issue", "9402"], proj)
+    c("record: path spellings normalize to one artifact key", fn_path_norm)
+
+    def fn_malformed_rpack():
+        bad = proj / "bad.rpack"
+        bad.write_text("{ truncated", encoding="utf-8")
+        p = engine(exe, ["verify", "--rpack", "bad.rpack"], proj)
+        expect(p.returncode != 0, "malformed rpack must fail")
+        expect("Traceback (most recent call last)" not in p.stderr,
+               "raw traceback on malformed rpack")
+    c("verify: malformed rpack dies clean (no traceback)", fn_malformed_rpack)
+
+    def fn_gate_wrong_shape():
+        for event in ('42', '"x"', '["a"]', '{"tool_input": "notdict"}'):
+            p = engine(exe, ["gate-pr"], proj, stdin_text=event)
+            expect("Traceback (most recent call last)" not in p.stderr,
+                   f"gate traceback on {event}")
+            expect(p.returncode == 0, f"gate must allow malformed event {event}")
+    c("gate: wrong-shape events never crash (fail-safe)", fn_gate_wrong_shape)
+
+
 def scenario_re_edit(rec: Recorder, interp_name: str, exe: str, proj: Path) -> None:
     scenario = "re-edit-heavy"
     issue = str(ISSUE_NUMBERS[scenario])
@@ -584,6 +651,7 @@ def run_scenario(rec: Recorder, name: str, base: Path,
             scenario_large(rec, interp_name, exe, proj)
         elif name == "re-edit-heavy":
             scenario_re_edit(rec, interp_name, exe, proj)
+            scenario_validation(rec, interp_name, exe, proj)
         elif name == "ts-vitest-stub":
             pass  # detection-only scenario
 
