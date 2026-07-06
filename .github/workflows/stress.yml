@@ -1,9 +1,15 @@
 name: Stress
 
 # Full end-to-end stress matrix (sample projects of varying complexity driven
-# through the real engine CLI). Manual trigger only — run before releases.
+# through the real engine CLI). Runs manually, or when the harness itself
+# changes (workflow_dispatch only works from the default branch, so the push
+# trigger is what exercises release branches).
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "stress/**"
+      - ".github/workflows/stress.yml"
 
 jobs:
   stress:
