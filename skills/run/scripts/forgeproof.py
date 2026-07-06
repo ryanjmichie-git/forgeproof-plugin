@@ -1410,6 +1410,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # Emit UTF-8 no matter the platform: Windows encodes piped stdout with a
+    # legacy codepage by default, which turned summary punctuation (em dash)
+    # into mojibake for whoever captured the output.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except (ValueError, OSError):
+                pass
+
     parser = build_parser()
     args = parser.parse_args()
 

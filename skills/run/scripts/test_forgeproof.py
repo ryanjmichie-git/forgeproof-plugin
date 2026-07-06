@@ -155,6 +155,24 @@ class TestCmdPreflight:
         checks = {c["dependency"]: c for c in out["checks"]}
         assert checks["ssh-keygen"]["ok"] is True
 
+    def test_cli_output_is_utf8_on_every_platform(self, tmp_path):
+        """Regression: `summary` emits an em dash; on Windows a piped stdout
+        defaulted to a legacy codepage and produced mojibake. The CLI must
+        emit UTF-8 regardless of platform or console."""
+        chain_dir = tmp_path / ".forgeproof"
+        chain_dir.mkdir()
+        shutil.copyfile(FIXTURE_V101 / "issue-999.rpack",
+                        chain_dir / "issue-999.rpack")
+        env = dict(os.environ)
+        env.pop("PYTHONIOENCODING", None)  # must not rely on the env
+        result = subprocess.run(
+            [sys.executable, str(FORGEPROOF_PY), "summary", "--issue", "999"],
+            cwd=tmp_path, capture_output=True, timeout=60, env=env)
+        assert result.returncode == 0, result.stderr
+        text = result.stdout.decode("utf-8")  # strict: raises on mojibake
+        assert "ForgeProof Provenance — Issue #999" in text
+        assert "�" not in text
+
     def test_run_closes_stdin_by_default(self, monkeypatch):
         """No engine subprocess may inherit an open stdin — any child that
         prompts interactively would hang the whole hook/skill invocation."""
