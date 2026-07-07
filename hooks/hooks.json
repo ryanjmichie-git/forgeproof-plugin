@@ -1,13 +1,18 @@
 {
-  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "description": "ForgeProof: PR gate (blocks gh pr create without a signed .rpack, on both the Bash and PowerShell shell tools) and per-file lint during active runs. Each entry is a single quoted command with no shell chaining (v1.0.1's `||` fallback converted a block into exit 127 on python3-only systems). Two entries per event: whichever interpreter exists delivers the verdict; a missing interpreter is spawn noise, never a fake allow. The gate blocks via permissionDecision JSON on stdout AND exit 2, so it fails closed whichever protocol the running Claude Code honors. NOTE: exec-form entries (command + args array) are documented but were silently ignored at runtime by Claude Code 2.1.128 — do not convert these to exec form without a live plugin-loaded retest.",
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py gate-pr 2>/dev/null || python ${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py gate-pr",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/run/scripts/forgeproof.py\" gate-pr",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/skills/run/scripts/forgeproof.py\" gate-pr",
             "timeout": 10
           }
         ]
@@ -19,7 +24,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if ls .forgeproof/chain-*.json 1>/dev/null 2>&1; then python ${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py lint --quiet 2>&1 | head -20; fi; true",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/run/scripts/forgeproof.py\" lint-hook",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/skills/run/scripts/forgeproof.py\" lint-hook",
             "timeout": 30
           }
         ]

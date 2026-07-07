@@ -25,14 +25,24 @@ claude plugin install forgeproof@claude-community
 
 ## Requirements
 
-- **Python 3.11+** (stdlib only — no pip dependencies)
-- **OpenSSH 8.0+** (provides `ssh-keygen` for Ed25519 signing)
+- **Python 3.11+** (stdlib only — no pip dependencies). Either `python3` or `python` on `PATH` works; the plugin detects which one you have.
+- **OpenSSH 8.0+** (provides `ssh-keygen` for Ed25519 signing). Included on macOS and Linux. On Windows it ships as the "OpenSSH Client" optional feature (present by default on Windows 10+, occasionally disabled — enable it under *Settings → System → Optional features*, or install [Git for Windows](https://gitforwindows.org/), which bundles it).
 - **GitHub CLI** (`gh`) authenticated to your account — [install](https://cli.github.com/)
 
-Verify your setup:
-```bash
-/forgeproof preflight
-```
+ForgeProof checks all of this for you at the start of every `/forgeproof:run` (the preflight step) and tells you exactly what is missing.
+
+## Upgrading from 1.0.x
+
+v1.1.0 renames the command surface so slash commands read naturally. Old names are removed, not aliased:
+
+| v1.0.x | v1.1.0 |
+|--------|--------|
+| `/forgeproof <issue>` | `/forgeproof:run <issue>` |
+| `/forgeproof-push` | `/forgeproof:push` |
+| `/forgeproof-verify <path>` | `/forgeproof:verify <path>` |
+| `/forgeproof-reset <issue\|--all>` | `/forgeproof:reset <issue\|--all>` |
+
+No state migration is needed: the `.forgeproof/` directory layout is unchanged, and **every bundle ever signed by any v1.0.x release still verifies** — that is a permanent compatibility promise, enforced in CI by a frozen v1.0.1 fixture bundle.
 
 ## Supported Languages
 
@@ -40,7 +50,7 @@ ForgeProof auto-detects your project's language and toolchain:
 
 | Language | Config file | Test runner | Linter |
 |----------|-------------|-------------|--------|
-| Python | `pyproject.toml`, `setup.cfg` | pytest | ruff, flake8 |
+| Python | `pyproject.toml`, `setup.cfg`, `setup.py`, `requirements.txt` | pytest | ruff, flake8 |
 | TypeScript/JavaScript | `package.json` | jest, vitest, mocha | eslint |
 | Go | `go.mod` | go test | golangci-lint |
 
@@ -49,20 +59,20 @@ ForgeProof auto-detects your project's language and toolchain:
 ### Generate code from an issue
 
 ```
-/forgeproof 42
+/forgeproof:run 42
 ```
 
 Runs the full pipeline: fetch issue → extract requirements → plan → generate code → run tests → sign `.rpack` bundle. You'll be asked to approve the plan before code generation begins.
 
 Browse your assigned issues instead:
 ```
-/forgeproof
+/forgeproof:run
 ```
 
 ### Push to a PR
 
 ```
-/forgeproof-push
+/forgeproof:push
 ```
 
 Creates a git branch and opens a pull request with the provenance summary embedded in the PR description.
@@ -70,7 +80,7 @@ Creates a git branch and opens a pull request with the provenance summary embedd
 ### Verify a bundle
 
 ```
-/forgeproof-verify .forgeproof/issue-42.rpack
+/forgeproof:verify .forgeproof/issue-42.rpack
 ```
 
 Checks the Ed25519 signature, hash chain integrity, and artifact hashes. Reports whether the bundle has been tampered with.
@@ -78,14 +88,14 @@ Checks the Ed25519 signature, hash chain integrity, and artifact hashes. Reports
 ### Clean up state
 
 ```
-/forgeproof-reset 42
+/forgeproof:reset 42
 ```
 
 Removes provenance chains, bundles, ephemeral keys, and branches for a specific issue. Use `--all` to clean everything.
 
 ### Re-running on the same issue
 
-ForgeProof handles re-runs gracefully. Running `/forgeproof 42` again will:
+ForgeProof handles re-runs gracefully. Running `/forgeproof:run 42` again will:
 - Clean up the previous chain and bundle (via `--force`)
 - Delete and recreate the local branch
 - Push with `--force-with-lease` if the remote branch exists
@@ -130,52 +140,62 @@ ForgeProof stores provenance data locally in the `.forgeproof/` directory at you
 
 ## Troubleshooting
 
-**"No chain found for issue N"** — Run `/forgeproof N` first to initialize the chain.
+**"No chain found for issue N"** — Run `/forgeproof:run N` first to initialize the chain.
 
-**"No ephemeral key found"** — The key is session-scoped. If you initialized the chain in a previous session, you'll need to re-run `/forgeproof N` to generate a new key.
+**"No ephemeral key found"** — The key is session-scoped. If you initialized the chain in a previous session, you'll need to re-run `/forgeproof:run N` to generate a new key.
 
-**"ssh-keygen failed"** — Ensure OpenSSH 8.0+ is installed. On macOS, the built-in ssh-keygen works. On Linux, install `openssh-client`.
+**"ssh-keygen failed"** — Ensure OpenSSH 8.0+ is installed. On macOS, the built-in ssh-keygen works. On Linux, install `openssh-client`. On Windows, enable the "OpenSSH Client" optional feature or install Git for Windows.
+
+**"artifact recheck failed" during finalize** — A recorded file changed on disk after it was recorded. This is finalize refusing to sign a bundle that doesn't match reality. Record the current state of each named file (`record --action file-edit`) and finalize again.
 
 **"gh issue list failed"** — Run `gh auth status` to check authentication. Run `gh auth login` if needed.
 
 **Verification fails with "Root digest mismatch"** — The bundle contents were modified after signing. This is the tamper detection working as intended.
 
-**Verification warns "Artifact not found"** — Normal when verifying a bundle from a different checkout or branch. The artifact hashes can only be checked against files that exist locally.
+**Verification warns "Artifact not found"** — Normal when verifying a bundle from a different checkout or branch. ForgeProof deliberately treats a *missing* artifact or chain file as a warning (it cannot be checked here), while a *modified* one is a hard error (tamper). A `.rpack` is a portable receipt, so absence means "not present in this checkout," not "altered." When verifying in the origin repo where the files should exist, a missing-artifact warning means your working tree is incomplete.
 
 ## Known Limitations
 
-- **Post-rebase commit SHA mismatch** — If you rebase a forgeproof branch after finalization, the `commit_sha` in the bundle no longer matches the branch HEAD. Verification still passes (it checks artifacts and chain integrity, not git commits). Workaround: re-run `/forgeproof` after rebasing.
-- **Ephemeral keys are session-scoped** — The Ed25519 private key exists only in `/tmp` for the current session. If the session ends before finalization, re-run `/forgeproof` to generate a new key.
+- **Recording completeness is prompt-enforced** — `finalize` re-hashes every recorded file and refuses to sign if any no longer matches disk, so a signed bundle is guaranteed to match reality *for the files it records, at signing time*. That Claude recorded *every* edit it made is enforced by the skill instructions, not by cryptography. Provenance makes work attributable and tamper-evident; it does not make unrecorded work impossible.
+- **Post-rebase commit SHA mismatch** — If you rebase a forgeproof branch after finalization, the `commit_sha` in the bundle no longer matches the branch HEAD. Verification still passes (it checks artifacts and chain integrity, not git commits). Workaround: re-run `/forgeproof:run` after rebasing.
+- **Ephemeral keys are session-scoped** — The Ed25519 private key exists only in the system temp directory for the current session. If the session ends before finalization, re-run `/forgeproof:run` to generate a new key.
 - **No `.gitignore` enforcement** — ForgeProof warns if no `.gitignore` exists but does not create one. Ensure your project has one to avoid committing `__pycache__/` and other generated files.
 
 ## Hooks (Automatic Behavior)
 
-ForgeProof registers two hooks. Both are scoped to ForgeProof workflows only — neither fires during normal sessions.
+ForgeProof registers two hooks. Honest accounting of what they cost and when they act:
 
-- **PreToolUse** — When Claude attempts to run `gh pr create`, the hook checks for a signed `.rpack` bundle in `.forgeproof/`. If no bundle exists, the PR creation is blocked with a message directing the user to run `/forgeproof` first. This prevents unsigned PRs.
+- **PreToolUse (PR gate)** — Spawns on *every* Bash or PowerShell tool call while the plugin is enabled (a fast, read-only Python process that exits immediately for anything that isn't `gh pr create`). When the command *is* `gh pr create` and no signed `.rpack` exists in `.forgeproof/`, it blocks the call and tells Claude to run `/forgeproof:run` first. Both shell tools are gated — covering Bash alone would let PRs bypass provenance from Windows PowerShell sessions. It blocks through two independent protocols (a structured permission denial on stdout and exit code 2), so the gate fails **closed** regardless of which one your Claude Code version honors.
 
-- **PostToolUse** — After each `Edit` or `Write` operation, the hook runs the project's detected linter. This only fires when an active ForgeProof chain exists (`.forgeproof/chain-*.json`). Outside of ForgeProof workflows, the hook is a no-op.
+- **PostToolUse (lint feedback)** — Spawns after each `Edit`/`Write` and exits silently unless an active ForgeProof chain exists (`.forgeproof/chain-*.json`). During an active run it lints **only the edited file** (never the whole project) and surfaces up to 20 lines of findings to Claude as context. It never blocks an edit.
+
+Both hooks are registered twice, once for `python3` and once for `python`, so whichever interpreter your system has delivers the verdict — a missing interpreter produces harmless spawn noise, never a silently disabled gate. On systems with both interpreters the hooks run twice; both are read-only and idempotent, so the duplicate is cosmetic.
 
 ## Testing & Validation
 
-ForgeProof includes 38 automated tests covering:
+ForgeProof includes 83 automated tests covering:
 
 - Utility functions (SHA-256, canonical JSON determinism)
 - Chain operations (hash linkage, block structure, save/load)
-- All subcommands (init, record, finalize, verify, detect, summary, reset)
+- All subcommands (init, record, finalize, verify, detect, summary, reset, lint-hook, gate-pr)
+- **v1.0.x compatibility** — a bundle generated by the unmodified v1.0.1 engine is frozen in the repo and must verify forever
+- **Hook configuration** — the exact configured hook commands are spawned against block/allow scenarios, so a never-fires misconfiguration fails CI loudly
+- **Skill contract** — every engine invocation documented in the skills is parsed against the real CLI, so a stale example fails CI instead of breaking a run
 - End-to-end integration (full pipeline with real Ed25519 signing and tamper detection)
+
+CI runs the suite on Ubuntu, macOS, and Windows (both Git Bash and cmd.exe), plus a python3-only Debian container that has no `python` command at all.
 
 Run the test suite:
 ```bash
-python -m pytest skills/forgeproof/scripts/test_forgeproof.py -v
+python -m pytest skills/run/scripts/test_forgeproof.py -v
 ```
 
-Plugin validation:
+Plugin validation (validate the plugin manifest explicitly — pointing `validate` at the repo root triggers *marketplace* validation instead, because `.claude-plugin/marketplace.json` exists):
 ```bash
-claude plugin validate .
+claude plugin validate .claude-plugin/plugin.json
 ```
 
-The plugin was validated end-to-end across 4 GitHub issues on a real Python project, covering bug fixes, feature additions, search functionality, and JSON serialization. All provenance bundles were verified with `/forgeproof-verify`.
+The plugin was validated end-to-end across 4 GitHub issues on a real Python project, covering bug fixes, feature additions, search functionality, and JSON serialization. All provenance bundles were verified with `/forgeproof:verify`.
 
 ## Changelog
 

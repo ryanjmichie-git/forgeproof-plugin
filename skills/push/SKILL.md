@@ -1,8 +1,8 @@
 ---
-name: forgeproof-push
+name: push
 description: >
   Push a ForgeProof branch and open a pull request with provenance metadata
-  embedded in the PR description. Use after running /forgeproof to create
+  embedded in the PR description. Use after running /forgeproof:run to create
   a PR from the generated code. Triggers on "push forgeproof", "create PR
   from forgeproof", or "open pull request with provenance".
 allowed-tools:
@@ -15,7 +15,11 @@ allowed-tools:
 Create a pull request from a completed ForgeProof run with provenance
 metadata embedded in the PR description.
 
-The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py`.
+The provenance engine script is at `${CLAUDE_PLUGIN_ROOT}/skills/run/scripts/forgeproof.py`
+(referenced as `$FP` below). Determine the Python interpreter once: run
+`python3 --version`; if that fails or reports Python is not found, use
+`python`. Set `$FP_PY` to whichever succeeded. The examples use bash syntax;
+if your shell is PowerShell, adapt the invocation (`& $FP_PY $FP ...`).
 
 ## Step 1 — Identify the ForgeProof branch
 
@@ -40,7 +44,7 @@ Check that a finalized `.rpack` bundle exists:
 ls .forgeproof/issue-$ISSUE.rpack
 ```
 
-If it does not exist, tell the user to run `/forgeproof $ISSUE` first.
+If it does not exist, tell the user to run `/forgeproof:run $ISSUE` first.
 
 ## Step 3 — Push branch
 
@@ -63,7 +67,7 @@ git push -u origin forgeproof/$ISSUE
 
 Run the summary command to get the provenance table:
 ```
-python ${CLAUDE_PLUGIN_ROOT}/skills/forgeproof/scripts/forgeproof.py summary --issue $ISSUE
+"$FP_PY" "$FP" summary --issue $ISSUE
 ```
 
 Build the PR body with this structure:
@@ -74,9 +78,9 @@ Closes #$ISSUE
 <summary output from above>
 
 ---
-*This PR was generated with [ForgeProof](https://github.com/...). The `.rpack`
+*This PR was generated with [ForgeProof](https://github.com/ryanjmichie-git/forgeproof-plugin). The `.rpack`
 bundle in `.forgeproof/` is a cryptographically signed provenance record.
-Run `/forgeproof-verify .forgeproof/issue-$ISSUE.rpack` to verify integrity.*
+Run `/forgeproof:verify .forgeproof/issue-$ISSUE.rpack` to verify integrity.*
 ```
 
 ## Step 5 — Create PR

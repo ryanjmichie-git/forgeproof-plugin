@@ -1,6 +1,6 @@
 # ForgeProof Privacy Policy
 
-**Last Updated:** 2026-04-15
+**Last Updated:** 2026-07-03
 
 ---
 
@@ -52,7 +52,7 @@ ForgeProof does not:
 
 There are no usage counters, no heartbeat pings, no crash reporters, no feature flags fetched from remote servers, no A/B testing, and no opt-in or opt-out telemetry settings — because there is no telemetry infrastructure to toggle.
 
-This is verifiable: the provenance engine (`skills/forgeproof/scripts/forgeproof.py`) imports only Python standard library modules (`hashlib`, `json`, `subprocess`, `argparse`, `tempfile`, `pathlib`, `shutil`, `os`, `sys`). No third-party packages. No network-capable imports.
+This is verifiable: the provenance engine (`skills/run/scripts/forgeproof.py`) imports only Python standard library modules (`hashlib`, `json`, `subprocess`, `argparse`, `tempfile`, `pathlib`, `shutil`, `os`, `sys`). No third-party packages. No network-capable imports.
 
 ---
 
@@ -62,7 +62,7 @@ This is verifiable: the provenance engine (`skills/forgeproof/scripts/forgeproof
 
 Key lifecycle:
 
-1. **Generation** — When `/forgeproof` initializes a chain, `ssh-keygen` generates an Ed25519 keypair in the system temp directory (`/tmp` on Unix, `%TEMP%` on Windows) at `forgeproof_<issue>_ed25519`.
+1. **Generation** — When `/forgeproof:run` initializes a chain, `ssh-keygen` generates an Ed25519 keypair in the system temp directory (`/tmp` on Unix, `%TEMP%` on Windows) at `forgeproof_<issue>_ed25519`.
 2. **Usage** — The private key signs each block in the hash chain and the final root digest of the `.rpack` bundle.
 3. **Deletion** — Immediately after the bundle is finalized, the private key and its `.pub` companion are deleted from the temp directory. This is irreversible — the key cannot be recovered.
 4. **Public key persistence** — The public key is embedded in the `.rpack` bundle for self-contained verification. It cannot be used to forge signatures without the deleted private key.
@@ -81,7 +81,7 @@ At no point are private keys:
 
 ### Reads
 - Project source files (to compute SHA-256 hashes for provenance)
-- `pyproject.toml`, `package.json`, `go.mod` (to detect project toolchain)
+- `pyproject.toml`, `setup.cfg`, `setup.py`, `requirements.txt`, `package.json`, `go.mod` (to detect project toolchain)
 - `.gitignore` (to check if it exists)
 - `.forgeproof/` directory contents (chain files, `.rpack` bundles)
 
@@ -101,25 +101,24 @@ ForgeProof does not:
 
 ## Scope of Activation
 
-**ForgeProof's hooks activate only during ForgeProof workflows, not on all sessions.**
+**ForgeProof's hooks spawn a short-lived local Python process per matching tool call and act only during ForgeProof workflows.**
 
 ForgeProof registers two hooks:
 
-### PreToolUse Hook
-- **Matcher:** `Bash(gh pr create)` — fires only when Claude attempts to run `gh pr create`
-- **Behavior:** Checks if a signed `.rpack` bundle exists in `.forgeproof/`. If not, blocks the PR creation with an informational message.
-- **Scope:** Only relevant when creating GitHub PRs. Does not fire on any other command.
+### PreToolUse Hook (PR gate)
+- **Matcher:** `Bash|PowerShell` — the hook process spawns on every Bash or PowerShell tool call while the plugin is enabled. It is read-only and exits immediately (allow) for any command that is not `gh pr create`.
+- **Behavior:** For `gh pr create`, checks whether a signed `.rpack` bundle exists in `.forgeproof/`. If not, blocks the PR creation with an informational message.
+- **Data handling:** The hook reads the tool-call event (tool name and command string) from stdin to make that one local decision. It does not log, store, or transmit it.
 
-### PostToolUse Hook
-- **Matcher:** `Edit|Write` — fires after file edit operations
-- **Behavior:** Checks if an active ForgeProof chain exists (`.forgeproof/chain-*.json`). If no chain exists, the hook exits immediately as a no-op. If a chain exists, runs the project's detected linter.
-- **Scope:** Effectively no-op outside of active `/forgeproof` runs.
+### PostToolUse Hook (lint feedback)
+- **Matcher:** `Edit|Write` — the hook process spawns after file edit operations.
+- **Behavior:** Exits immediately as a no-op unless an active ForgeProof chain exists (`.forgeproof/chain-*.json`). During an active run it lints only the edited file and surfaces the findings to Claude. It never blocks an edit.
+- **Scope:** No-op outside of active `/forgeproof:run` runs.
 
 Neither hook:
-- Fires on all sessions indiscriminately
 - Reads or logs prompt content
 - Transmits data anywhere
-- Runs background processes
+- Runs background processes (each invocation is a short-lived process that exits when its check completes)
 
 ---
 
@@ -156,7 +155,7 @@ The bundle does **not** contain:
 - API keys, tokens, or credentials
 - Personal information beyond what's in the GitHub issue
 
-The bundle is written to `.forgeproof/issue-<N>.rpack` in your project directory. It is only transmitted if you explicitly push it to GitHub via `/forgeproof-push`. You can delete it at any time with `/forgeproof-reset`.
+The bundle is written to `.forgeproof/issue-<N>.rpack` in your project directory. It is only transmitted if you explicitly push it to GitHub via `/forgeproof:push`. You can delete it at any time with `/forgeproof:reset`.
 
 ---
 
@@ -164,7 +163,7 @@ The bundle is written to `.forgeproof/issue-<N>.rpack` in your project directory
 
 Every claim in this document can be verified by reading the source code:
 
-- **Provenance engine:** `skills/forgeproof/scripts/forgeproof.py`
+- **Provenance engine:** `skills/run/scripts/forgeproof.py`
 - **Hook definitions:** `hooks/hooks.json`
 - **Skill prompts:** `skills/*/SKILL.md`
 
@@ -176,4 +175,5 @@ The entire plugin is open source under the MIT license.
 
 | Date | Version | Change |
 |------|---------|--------|
+| 2026-07-03 | 1.1.0 | Updated hook scope to match v1.1.0 behavior (matcher `Bash\|PowerShell`, per-call spawn cost stated plainly, per-file lint); refreshed paths and command names after the skill rename |
 | 2026-04-15 | 1.0.0 | Initial privacy policy |

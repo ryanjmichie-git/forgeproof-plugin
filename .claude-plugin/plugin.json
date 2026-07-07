@@ -1,6 +1,6 @@
 {
   "name": "forgeproof",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Converts GitHub issues into working code with cryptographically signed provenance bundles. Every file edit, design decision, and test result is recorded in a tamper-evident Ed25519 hash chain. The .rpack bundle lets reviewers verify AI-generated code was not altered after creation — no external services, no API keys, pure local cryptography.",
   "author": {
     "name": "Ryan Michie",

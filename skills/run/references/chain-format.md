@@ -34,7 +34,7 @@ The `hash` is computed over the canonical JSON (sorted keys, no whitespace) of t
 
 - **Hash chain**: Each block's `prev_hash` must equal the preceding block's `hash`. The genesis block uses 64 zeros as `prev_hash`.
 - **Tamper evidence**: Modifying any field in any block changes its hash, which breaks the chain linkage for all subsequent blocks.
-- **Signatures**: Each block is signed with the ephemeral Ed25519 key generated at `init` time. Signatures are verified using `ssh-keygen -Y verify`.
+- **Signatures**: Each block carries an Ed25519 signature (made with the ephemeral key generated at `init` time) over its hash. The verifier checks every block's hash and linkage, and cryptographically verifies the bundle's **root-digest signature** with `ssh-keygen -Y verify`; per-block signatures are recorded in the chain but are not individually re-verified by `verify` (the root signature covers the chain hash, which covers every block).
 
 ## Known Limitations
 
@@ -46,4 +46,4 @@ The `finalize` block records the `commit_sha` at bundle creation time. If the br
 
 **What breaks:** The `commit_sha` in the bundle no longer matches the branch HEAD. Anyone correlating the bundle to git history will see a mismatch.
 
-**Workaround:** Re-run `/forgeproof` on the issue after rebasing to generate a fresh bundle with the new commit SHA. Use `/forgeproof-reset` to clean up the old state first.
+**Workaround:** Re-run `/forgeproof:run` on the issue after rebasing to generate a fresh bundle with the new commit SHA. Use `/forgeproof:reset` to clean up the old state first.
