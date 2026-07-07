@@ -1222,6 +1222,95 @@ class TestMalformedInputRobustness:
         assert r.returncode != 0
         assert "not valid JSON" in r.stderr
 
+    # Wrong-SHAPE (well-formed JSON, wrong structure) — the class an
+    # independent audit surfaced beyond malformed-JSON. Every one must die
+    # cleanly or return a red verdict, never traceback.
+
+    def _make_bundle(self, tmp_path):
+        cd = tmp_path / ".forgeproof"
+        cd.mkdir()
+        shutil.copyfile(FIXTURE_V101 / "issue-999.rpack", cd / "issue-999.rpack")
+        shutil.copyfile(FIXTURE_V101 / "chain-999.json", cd / "chain-999.json")
+        src = tmp_path / "src"
+        src.mkdir()
+        shutil.copyfile(FIXTURE_V101 / "src" / "example.py", src / "example.py")
+        return cd / "issue-999.rpack", cd / "chain-999.json"
+
+    def test_verify_issue_field_wrong_type_dies_clean(self, tmp_path):
+        rpack, _ = self._make_bundle(tmp_path)
+        b = json.loads(rpack.read_text(encoding="utf-8"))
+        b["issue"] = 7  # an int, not the object verify expects
+        rpack.write_text(json.dumps(b), encoding="utf-8")
+        r = self._cli(tmp_path, "verify", "--rpack", ".forgeproof/issue-999.rpack")
+        self._no_traceback(r)
+        assert r.returncode != 0
+
+    def test_verify_null_chain_block_is_red_not_crash(self, tmp_path):
+        rpack, chain = self._make_bundle(tmp_path)
+        chain.write_text("[null]", encoding="utf-8")
+        r = self._cli(tmp_path, "verify", "--rpack", ".forgeproof/issue-999.rpack")
+        self._no_traceback(r)
+        assert r.returncode == 1
+        assert '"verified": false' in r.stdout
+
+    def test_summary_empty_object_bundle_dies_clean(self, tmp_path):
+        rpack, _ = self._make_bundle(tmp_path)
+        rpack.write_text("{}", encoding="utf-8")
+        r = self._cli(tmp_path, "summary", "--issue", "999")
+        self._no_traceback(r)
+        assert r.returncode != 0
+        assert "missing required fields" in r.stderr
+
+    def test_record_dict_chain_dies_clean(self, tmp_path):
+        _, chain = self._make_bundle(tmp_path)
+        chain.write_text("{}", encoding="utf-8")  # object, not a list of blocks
+        r = self._cli(tmp_path, "record", "--issue", "999", "--action", "decision",
+                      "--context", "a", "--choice", "b", "--rationale", "c")
+        self._no_traceback(r)
+        assert r.returncode != 0
+        assert "corrupt" in r.stderr
+
+
+class TestSignatureCanonical:
+    """A bundle signature must be exactly the SSHSIG armor ssh-keygen emitted;
+    ssh-keygen -Y verify ignores trailing bytes, so without a canonical check
+    the signature field could be altered post-signing and still verify."""
+
+    def test_canonical_accepts_real_signature(self):
+        bundle = json.loads((FIXTURE_V101 / "issue-999.rpack").read_text(encoding="utf-8"))
+        assert fp.signature_is_canonical(bundle["signature"])
+
+    @pytest.mark.parametrize("mutate", [
+        lambda s: s + "x",                       # trailing char after END
+        lambda s: s + "\nFORGED-TRAILER",        # trailing junk line
+        lambda s: "prefix" + s,                  # leading junk
+        lambda s: s.replace("SIGNATURE", "sig"), # broken markers
+    ])
+    def test_canonical_rejects_trailing_or_altered(self, mutate):
+        bundle = json.loads((FIXTURE_V101 / "issue-999.rpack").read_text(encoding="utf-8"))
+        assert not fp.signature_is_canonical(mutate(bundle["signature"]))
+
+    def test_verify_rejects_signature_with_trailing_data(self, tmp_path):
+        if not shutil.which("ssh-keygen"):
+            pytest.skip("ssh-keygen not available")
+        cd = tmp_path / ".forgeproof"
+        cd.mkdir()
+        (tmp_path / "src").mkdir()
+        shutil.copyfile(FIXTURE_V101 / "src" / "example.py",
+                        tmp_path / "src" / "example.py")
+        shutil.copyfile(FIXTURE_V101 / "chain-999.json", cd / "chain-999.json")
+        bundle = json.loads((FIXTURE_V101 / "issue-999.rpack").read_text(encoding="utf-8"))
+        bundle["signature"] = bundle["signature"] + "x"
+        (cd / "issue-999.rpack").write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, str(FORGEPROOF_PY), "verify",
+             "--rpack", ".forgeproof/issue-999.rpack"],
+            cwd=tmp_path, capture_output=True, text=True, timeout=60)
+        assert r.returncode == 1
+        out = json.loads(r.stdout)
+        assert out["verified"] is False
+        assert any("trailing or altered" in e for e in out["errors"])
+
 
 # ---------------------------------------------------------------------------
 # Hooks configuration (the loud PR-gate regression test)

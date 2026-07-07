@@ -152,7 +152,7 @@ ForgeProof stores provenance data locally in the `.forgeproof/` directory at you
 
 **Verification fails with "Root digest mismatch"** — The bundle contents were modified after signing. This is the tamper detection working as intended.
 
-**Verification warns "Artifact not found"** — Normal when verifying a bundle from a different checkout or branch. The artifact hashes can only be checked against files that exist locally.
+**Verification warns "Artifact not found"** — Normal when verifying a bundle from a different checkout or branch. ForgeProof deliberately treats a *missing* artifact or chain file as a warning (it cannot be checked here), while a *modified* one is a hard error (tamper). A `.rpack` is a portable receipt, so absence means "not present in this checkout," not "altered." When verifying in the origin repo where the files should exist, a missing-artifact warning means your working tree is incomplete.
 
 ## Known Limitations
 

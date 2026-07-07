@@ -38,6 +38,17 @@ Linux with no `python` symlink. Bundle format unchanged — every v1.0.x
 
 ### Fixed
 
+- **Signature-field malleability.** `ssh-keygen -Y verify` ignores bytes after
+  the SSHSIG END marker, so the `signature` field could be altered (junk
+  appended) while still verifying. Verify now also requires the signature to be
+  canonical SSHSIG armor, so any post-signing change to it turns verification
+  red. (Content was always protected by the root digest; no forgery was ever
+  possible — this closes the cosmetic malleability.)
+- **Wrong-shape (not just malformed) chain/bundle files no longer traceback.**
+  A bundle whose `issue` is not an object, a chain that is `[null]` or a JSON
+  object instead of a list, and an empty-object bundle passed to `summary` now
+  produce a clean error or a red verdict instead of a raw AttributeError /
+  TypeError / KeyError. Complements the earlier malformed-JSON hardening.
 - **`preflight` could hang forever.** It probed ssh-keygen with
   `ssh-keygen -h`, which is not a help flag — it starts *interactive key
   generation* and blocks on a stdin prompt (observed freezing live sessions

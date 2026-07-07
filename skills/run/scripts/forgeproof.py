@@ -188,6 +188,26 @@ def verify_signature(message: str, signature: str, public_key: str) -> bool:
         return result.returncode == 0
 
 
+SSHSIG_BEGIN = "-----BEGIN SSH SIGNATURE-----"
+SSHSIG_END = "-----END SSH SIGNATURE-----"
+_SSHSIG_BODY_CHARS = set(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n")
+
+
+def signature_is_canonical(sig: str) -> bool:
+    """A bundle signature must be exactly the SSHSIG armor ssh-keygen emitted,
+    with no trailing bytes. `ssh-keygen -Y verify` ignores data after the END
+    marker, so without this check the signature field could be altered (junk
+    appended) while still verifying — a change that must instead turn verify
+    red. Content is always protected by the root digest regardless; this closes
+    the cosmetic malleability of the signature field itself."""
+    s = sig.strip()
+    if not (s.startswith(SSHSIG_BEGIN) and s.endswith(SSHSIG_END)):
+        return False
+    body = s[len(SSHSIG_BEGIN):len(s) - len(SSHSIG_END)]
+    return all(c in _SSHSIG_BODY_CHARS for c in body)
+
+
 def read_public_key(pub_path: Path) -> str:
     """Read the public key string from a .pub file."""
     return pub_path.read_text().strip()
@@ -216,7 +236,10 @@ def load_chain(issue: str) -> list[dict]:
     path = chain_path(issue)
     if not path.exists():
         die(f"No chain found for issue {issue}. Run 'init' first.")
-    return read_json_file(path, f"chain for issue {issue}")
+    chain = read_json_file(path, f"chain for issue {issue}")
+    if not isinstance(chain, list) or not all(isinstance(b, dict) for b in chain):
+        die(f"chain for issue {issue} is corrupt (expected a list of blocks): {path}")
+    return chain
 
 
 def save_chain(issue: str, chain: list[dict]) -> None:
@@ -970,19 +993,25 @@ def cmd_verify(args: argparse.Namespace) -> None:
         info("Root digest: OK")
 
     # 3. Verify signature
-    if stored_signature and public_key:
+    if not isinstance(stored_signature, str):
+        errors.append("Signature field is not a string")
+    elif stored_signature and public_key:
+        if not signature_is_canonical(stored_signature):
+            errors.append("Signature field has trailing or altered data "
+                          "(not canonical SSHSIG)")
         sig_ok = verify_signature(stored_digest, stored_signature, public_key)
         if not sig_ok:
             errors.append("Ed25519 signature verification FAILED")
-        else:
+        elif not errors:
             info("Signature: OK")
     elif not stored_signature:
         warnings.append("No signature present in bundle")
 
     # 4. Verify chain hash
-    issue_num = str(bundle.get("issue", {}).get("number", ""))
-    chain_file = chain_path(issue_num)
-    if chain_file.is_file():
+    issue_field = bundle.get("issue")
+    issue_num = str(issue_field.get("number", "")) if isinstance(issue_field, dict) else ""
+    chain_file = chain_path(issue_num) if issue_num else None
+    if chain_file and chain_file.is_file():
         actual_chain_hash = sha256_hex(chain_file.read_text())
         if actual_chain_hash != bundle.get("chain_hash"):
             errors.append(f"Chain hash mismatch: chain file has been modified since bundle was signed")
@@ -993,12 +1022,20 @@ def cmd_verify(args: argparse.Namespace) -> None:
         # matched chain_hash is impossible, but a corrupt chain alongside an
         # intact bundle must fail closed, not traceback.
         chain = read_json_file(chain_file, f"chain for issue {issue_num}")
+        if not isinstance(chain, list):
+            errors.append("Chain file is corrupt (not a list of blocks)")
+            chain = []
         for i, block in enumerate(chain):
+            if not isinstance(block, dict):
+                errors.append(f"Block {i}: malformed (not an object)")
+                continue
             if i == 0:
-                if block["prev_hash"] != GENESIS_PREV_HASH:
+                if block.get("prev_hash") != GENESIS_PREV_HASH:
                     errors.append(f"Block 0: invalid genesis prev_hash")
             else:
-                if block["prev_hash"] != chain[i - 1]["hash"]:
+                prev = chain[i - 1]
+                prev_hash = prev.get("hash") if isinstance(prev, dict) else None
+                if block.get("prev_hash") != prev_hash:
                     errors.append(f"Block {i}: prev_hash does not match block {i-1} hash")
 
             # Verify block hash
@@ -1006,7 +1043,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
                 k: v for k, v in block.items() if k not in ("hash", "signature")
             }
             expected_hash = sha256_hex(canonical_json(block_for_hash))
-            if expected_hash != block["hash"]:
+            if expected_hash != block.get("hash"):
                 errors.append(f"Block {i}: hash mismatch (block has been tampered with)")
 
         info(f"Chain integrity: verified {len(chain)} blocks")
@@ -1082,13 +1119,20 @@ def cmd_summary(args: argparse.Namespace) -> None:
         die(f"No .rpack bundle found for issue {issue}. Run 'finalize' first.")
 
     bundle = read_json_file(rpack_path, "bundle")
-    issue_info = bundle["issue"]
-    evaluation = bundle["evaluation"]
-    reqs = bundle["requirements"]
-    artifacts = bundle["artifacts"]
+    if not isinstance(bundle, dict):
+        die(f"bundle is not a JSON object: {rpack_path}")
+    try:
+        issue_info = bundle["issue"]
+        evaluation = bundle["evaluation"]
+        reqs = bundle["requirements"]
+        artifacts = bundle["artifacts"]
+        status = evaluation["status"]
+        _ = issue_info["number"]
+    except (KeyError, TypeError):
+        die(f"bundle is missing required fields (corrupt or not a ForgeProof "
+            f"bundle): {rpack_path}")
 
     # Status emoji
-    status = evaluation["status"]
     status_badge = {"pass": "PASS", "partial": "PARTIAL", "fail": "FAIL"}.get(status, "UNKNOWN")
 
     lines = [

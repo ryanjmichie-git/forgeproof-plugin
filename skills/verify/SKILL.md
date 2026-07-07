@@ -51,6 +51,14 @@ Report that the bundle integrity is confirmed. Show:
 - Number of artifacts checked
 - Any warnings (missing artifacts are normal if verifying from a different checkout)
 
+Note the deliberate distinction ForgeProof draws: a **modified** artifact or chain
+turns verification RED (tamper detected), but a **missing** artifact or chain file is
+a WARNING, not an error — a `.rpack` is a portable receipt meant to be verified in
+checkouts that may not contain the original files, so absence is "cannot check here,"
+not "tampered." If you are verifying in the origin repo and expect the files to be
+present, treat `artifacts_missing > 0` or a "Chain file not found" warning as a signal
+that the working tree is incomplete, and say so.
+
 **If verification failed (errors present):**
 Report each error clearly. Common failure scenarios:
 - "Root digest mismatch" — the bundle contents have been modified since signing

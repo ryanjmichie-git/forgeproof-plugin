@@ -9,6 +9,9 @@ on:
   push:
     paths:
       - "stress/**"
+      - "skills/**"
+      - "hooks/**"
+      - ".claude-plugin/**"
       - ".github/workflows/stress.yml"
 
 jobs:
