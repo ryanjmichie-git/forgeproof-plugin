@@ -1725,6 +1725,51 @@ class TestV101Compat:
         assert output["verified"] is False
         assert any("signature verification FAILED" in e for e in output["errors"])
 
+    # -- v1.2.0 additive coverage (strict mode must honor the forever
+    #    contract: old bundles with all evidence present pass --strict) -----
+
+    def test_v10x_bundle_passes_strict(self, tmp_path, monkeypatch, capsys):
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        args = fp.build_parser().parse_args(
+            ["verify", "--rpack", str(rpack), "--strict"])
+        with pytest.raises(SystemExit) as exc_info:
+            fp.cmd_verify(args)
+        code = exc_info.value.code
+        output = json.loads(capsys.readouterr().out)
+        assert (0 if code is None else code) == 0
+        assert output["verified"] is True
+        assert output["errors"] == []
+        assert output["strict"] is True
+        assert output["complete"] is True
+
+    def test_v10x_strict_fails_when_artifact_removed(
+            self, tmp_path, monkeypatch, capsys):
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        bundle = json.loads(rpack.read_text(encoding="utf-8"))
+        [artifact] = bundle["artifacts"]
+        (tmp_path / artifact["path"]).unlink()
+        monkeypatch.chdir(tmp_path)
+        # lenient stays green (forever contract untouched)
+        code, output = self._verify(rpack, capsys)
+        assert code == 0
+        assert output["verified"] is True
+        assert output["artifacts_missing"] == 1
+        # strict goes red on the missing evidence
+        args = fp.build_parser().parse_args(
+            ["verify", "--rpack", str(rpack), "--strict"])
+        with pytest.raises(SystemExit) as exc_info:
+            fp.cmd_verify(args)
+        strict_code = exc_info.value.code
+        strict_output = json.loads(capsys.readouterr().out)
+        assert (0 if strict_code is None else strict_code) == 1
+        assert strict_output["verified"] is False
+        assert any(e.startswith("[strict] Artifact not found")
+                   for e in strict_output["errors"])
+        assert strict_output["complete"] is False
+
 
 # ---------------------------------------------------------------------------
 # v1.1.0 compatibility (forever contract — ROADMAP Principle 1)
@@ -1838,6 +1883,689 @@ class TestV110Compat:
         assert code == 1
         assert output["verified"] is False
         assert any("signature verification FAILED" in e for e in output["errors"])
+
+    # -- v1.2.0 additive coverage (strict mode must honor the forever
+    #    contract: old bundles with all evidence present pass --strict) -----
+
+    def test_v110_bundle_passes_strict(self, tmp_path, monkeypatch, capsys):
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        args = fp.build_parser().parse_args(
+            ["verify", "--rpack", str(rpack), "--strict"])
+        with pytest.raises(SystemExit) as exc_info:
+            fp.cmd_verify(args)
+        code = exc_info.value.code
+        output = json.loads(capsys.readouterr().out)
+        assert (0 if code is None else code) == 0
+        assert output["verified"] is True
+        assert output["errors"] == []
+        assert output["strict"] is True
+        assert output["complete"] is True
+
+    def test_v110_strict_fails_when_artifact_removed(
+            self, tmp_path, monkeypatch, capsys):
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        bundle = json.loads(rpack.read_text(encoding="utf-8"))
+        [artifact] = bundle["artifacts"]
+        (tmp_path / artifact["path"]).unlink()
+        monkeypatch.chdir(tmp_path)
+        # lenient stays green (forever contract untouched)
+        code, output = self._verify(rpack, capsys)
+        assert code == 0
+        assert output["verified"] is True
+        assert output["artifacts_missing"] == 1
+        # strict goes red on the missing evidence
+        args = fp.build_parser().parse_args(
+            ["verify", "--rpack", str(rpack), "--strict"])
+        with pytest.raises(SystemExit) as exc_info:
+            fp.cmd_verify(args)
+        strict_code = exc_info.value.code
+        strict_output = json.loads(capsys.readouterr().out)
+        assert (0 if strict_code is None else strict_code) == 1
+        assert strict_output["verified"] is False
+        assert any(e.startswith("[strict] Artifact not found")
+                   for e in strict_output["errors"])
+        assert strict_output["complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# v1.2.0 verify v2 (bundle-anchored paths, strict/complete, structured output)
+# ---------------------------------------------------------------------------
+
+
+def _deploy_v12_project(proj: Path, issue: str = "1") -> Path:
+    """Deploy a minimal unsigned-but-consistent bundle the way a real checkout
+    looks: chain + bundle under proj/.forgeproof/, one artifact at its
+    recorded relative path. Mirrors TestCmdVerify._build_minimal_bundle
+    (copied, not shared — that class is frozen) but writes a real .forgeproof
+    layout so anchoring and strictness can be exercised."""
+    fdir = proj / ".forgeproof"
+    fdir.mkdir(parents=True, exist_ok=True)
+    src = proj / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    artifact = src / "anchored.py"
+    artifact.write_text("ANSWER = 42\n", encoding="utf-8")
+
+    genesis = fp.build_block(
+        index=0, action="genesis",
+        data={"issue": int(issue), "title": "Anchor test",
+              "requirements": ["REQ-1: X"]},
+        prev_hash=fp.GENESIS_PREV_HASH, key_path=None,
+    )
+    edit = fp.build_block(
+        index=1, action="file-edit",
+        data={"path": "src/anchored.py", "operation": "create",
+              "sha256": fp.sha256_file(artifact)},
+        prev_hash=genesis["hash"], key_path=None,
+    )
+    fin = fp.build_block(
+        index=2, action="finalize",
+        data={"commit_sha": "c" * 40, "chain_length": 3},
+        prev_hash=edit["hash"], key_path=None,
+    )
+    chain_file = fdir / f"chain-{issue}.json"
+    chain_file.write_text(json.dumps([genesis, edit, fin], indent=2) + "\n",
+                          encoding="utf-8")
+
+    bundle = {
+        "version": fp.RPACK_VERSION,
+        "format": fp.RPACK_FORMAT,
+        "issue": {"number": int(issue), "title": "Anchor test", "url": ""},
+        "requirements": [{"id": "REQ-1", "text": "X", "status": "covered",
+                          "tests": ["t1"]}],
+        "artifacts": [{"path": "src/anchored.py", "operation": "create",
+                       "sha256": fp.sha256_file(artifact)}],
+        "decisions": [{"context": "how to anchor", "choice": "bundle parent",
+                       "rationale": "portable verification"}],
+        "evaluation": {
+            "status": "pass",
+            "tests_passed": 1,
+            "tests_failed": 0,
+            "lint_errors": 0,
+            "requirement_coverage": "100%",
+            "uncovered_requirements": [],
+            "failed_tests": [],
+        },
+        "chain_hash": fp.sha256_hex(chain_file.read_text(encoding="utf-8")),
+        "public_key": "",
+    }
+    bundle["root_digest"] = fp.sha256_hex(fp.canonical_json(bundle))
+    bundle["signature"] = ""
+    rpack = fdir / f"issue-{issue}.rpack"
+    rpack.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+    return rpack
+
+
+def _run_verify(argv: list[str], capsys) -> tuple[int, str]:
+    """Drive cmd_verify in-process through the real argparse surface,
+    returning (exit code, raw stdout)."""
+    args = fp.build_parser().parse_args(["verify", *argv])
+    with pytest.raises(SystemExit) as exc_info:
+        fp.cmd_verify(args)
+    code = exc_info.value.code
+    return (0 if code is None else code), capsys.readouterr().out
+
+
+class TestVerifyAnchoring:
+    """Issue #8: verify resolves the chain file and artifacts against the
+    bundle's location (anchor), not the caller's cwd — with a cwd fallback
+    preserving every pre-v1.2.0 layout."""
+
+    def test_verify_green_from_unrelated_cwd(self, tmp_path, monkeypatch, capsys):
+        proj = tmp_path / "proj"
+        rpack = _deploy_v12_project(proj)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        assert code == 0
+        assert output["verified"] is True
+        assert output["errors"] == []
+        assert not any("Chain file not found" in w for w in output["warnings"])
+        assert output["artifacts_checked"] == 1
+        assert output["artifacts_missing"] == 0
+
+    def test_explicit_project_root_wins(self, tmp_path, monkeypatch, capsys):
+        proj = tmp_path / "proj"
+        rpack = _deploy_v12_project(proj)
+        bare = tmp_path / "bare"
+        bare.mkdir()
+        moved = bare / "issue-1.rpack"
+        shutil.copyfile(rpack, moved)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        code, out = _run_verify(
+            ["--rpack", str(moved), "--project-root", str(proj)], capsys)
+        output = json.loads(out)
+        assert code == 0
+        assert output["verified"] is True
+        assert output["artifacts_checked"] == 1
+        assert not any("Chain file not found" in w for w in output["warnings"])
+        assert output["anchor"] == str(proj)
+
+    def test_lone_bundle_cwd_fallback_preserved(self, tmp_path, monkeypatch, capsys):
+        """Today's behavior: a bundle copied to a bare directory, verified
+        with cwd at the project, still finds chain and artifacts via cwd."""
+        proj = tmp_path / "proj"
+        rpack = _deploy_v12_project(proj)
+        bare = tmp_path / "bare"
+        bare.mkdir()
+        moved = bare / "issue-1.rpack"
+        shutil.copyfile(rpack, moved)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(moved)], capsys)
+        output = json.loads(out)
+        assert code == 0
+        assert output["verified"] is True
+        assert output["artifacts_checked"] == 1
+        assert not any("Chain file not found" in w for w in output["warnings"])
+
+    def test_anchor_field_reported(self, tmp_path, monkeypatch, capsys):
+        proj = tmp_path / "proj"
+        rpack = _deploy_v12_project(proj)
+        monkeypatch.chdir(tmp_path)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        assert code == 0
+        # bundle sits in proj/.forgeproof -> anchor is proj
+        assert output["anchor"] == str(proj)
+
+
+class TestVerifyStrict:
+    """Issue #9: --strict turns missing evidence into errors; `complete`
+    reports whether all evidence was present, in both modes."""
+
+    def _deploy(self, tmp_path):
+        proj = tmp_path / "proj"
+        return proj, _deploy_v12_project(proj)
+
+    def test_missing_artifact_lenient_warns(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._deploy(tmp_path)
+        (proj / "src" / "anchored.py").unlink()
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        assert code == 0
+        assert output["verified"] is True
+        assert any("Artifact not found" in w for w in output["warnings"])
+        assert output["artifacts_missing"] == 1
+        assert output["complete"] is False
+        assert output["strict"] is False
+
+    def test_missing_artifact_strict_fails(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._deploy(tmp_path)
+        (proj / "src" / "anchored.py").unlink()
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack), "--strict"], capsys)
+        output = json.loads(out)
+        assert code == 1
+        assert output["verified"] is False
+        assert any(e.startswith("[strict] Artifact not found")
+                   for e in output["errors"])
+        assert output["artifacts_missing"] == 1
+        assert output["complete"] is False
+        assert output["strict"] is True
+
+    def test_missing_chain_lenient_warns(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._deploy(tmp_path)
+        (proj / ".forgeproof" / "chain-1.json").unlink()
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        assert code == 0
+        assert output["verified"] is True
+        assert any("Chain file not found" in w for w in output["warnings"])
+        assert output["complete"] is False
+
+    def test_missing_chain_strict_fails(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._deploy(tmp_path)
+        (proj / ".forgeproof" / "chain-1.json").unlink()
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack), "--strict"], capsys)
+        output = json.loads(out)
+        assert code == 1
+        assert output["verified"] is False
+        assert any(e.startswith("[strict] Chain file not found")
+                   for e in output["errors"])
+        assert output["complete"] is False
+
+    def test_fully_present_strict_green(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._deploy(tmp_path)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack), "--strict"], capsys)
+        output = json.loads(out)
+        assert code == 0
+        assert output["verified"] is True
+        assert output["errors"] == []
+        assert output["complete"] is True
+        assert output["strict"] is True
+
+
+class TestVerifyContract:
+    """The seven legacy verify JSON keys are a frozen contract consumed by the
+    verify skill, CI, and the future GitHub Action. Snapshot their VALUES for
+    a green and a tampered bundle so any drift is a loud failure."""
+
+    LEGACY_KEYS = ["verified", "evaluation_status", "errors", "warnings",
+                   "artifacts_checked", "artifacts_missing",
+                   "artifacts_tampered"]
+
+    def _build_minimal_bundle(self, tmp_chain_dir, issue="1"):
+        """Copied from TestCmdVerify._build_minimal_bundle (frozen class)."""
+        genesis = fp.build_block(
+            index=0, action="genesis",
+            data={"issue": 1, "title": "Test", "requirements": ["REQ-1: X"]},
+            prev_hash=fp.GENESIS_PREV_HASH, key_path=None,
+        )
+        fp.save_chain(issue, [genesis])
+
+        bundle = {
+            "version": fp.RPACK_VERSION,
+            "format": fp.RPACK_FORMAT,
+            "issue": {"number": 1, "title": "Test", "url": ""},
+            "requirements": [{"id": "REQ-1", "text": "X", "status": "covered", "tests": ["t1"]}],
+            "artifacts": [],
+            "decisions": [],
+            "evaluation": {
+                "status": "pass",
+                "tests_passed": 1,
+                "tests_failed": 0,
+                "lint_errors": 0,
+                "requirement_coverage": "100%",
+                "uncovered_requirements": [],
+                "failed_tests": [],
+            },
+            "chain_hash": fp.sha256_hex(fp.chain_path(issue).read_text()),
+            "public_key": "",
+        }
+        root_digest = fp.sha256_hex(fp.canonical_json(bundle))
+        bundle["root_digest"] = root_digest
+        bundle["signature"] = ""
+
+        rpack_path = tmp_chain_dir / f"issue-{issue}.rpack"
+        rpack_path.write_text(json.dumps(bundle, indent=2))
+        return rpack_path, bundle
+
+    def test_green_bundle_legacy_values_snapshot(self, tmp_chain_dir, capsys):
+        rpack_path, _ = self._build_minimal_bundle(tmp_chain_dir)
+        code, out = _run_verify(["--rpack", str(rpack_path)], capsys)
+        output = json.loads(out)
+        assert code == 0
+        assert output["verified"] is True
+        assert output["evaluation_status"] == "pass"
+        assert output["errors"] == []
+        assert output["warnings"] == ["No signature present in bundle"]
+        assert output["artifacts_checked"] == 0
+        assert output["artifacts_missing"] == 0
+        assert output["artifacts_tampered"] == 0
+        # legacy keys come first, in their pre-v1.2.0 order
+        assert list(output)[:7] == self.LEGACY_KEYS
+
+    def test_tampered_bundle_legacy_values_snapshot(self, tmp_chain_dir, capsys):
+        rpack_path, bundle = self._build_minimal_bundle(tmp_chain_dir)
+        bundle["evaluation"]["tests_passed"] = 999
+        rpack_path.write_text(json.dumps(bundle, indent=2))
+        code, out = _run_verify(["--rpack", str(rpack_path)], capsys)
+        output = json.loads(out)
+        assert code == 1
+        assert output["verified"] is False
+        assert output["evaluation_status"] == "pass"  # sealed claim, key intact
+        assert len(output["errors"]) == 1
+        assert output["errors"][0].startswith("Root digest mismatch: computed ")
+        assert output["warnings"] == ["No signature present in bundle"]
+        assert output["artifacts_checked"] == 0
+        assert output["artifacts_missing"] == 0
+        assert output["artifacts_tampered"] == 0
+        assert list(output)[:7] == self.LEGACY_KEYS
+
+    def test_new_keys_shape(self, tmp_chain_dir, capsys):
+        rpack_path, _ = self._build_minimal_bundle(tmp_chain_dir)
+        code, out = _run_verify(["--rpack", str(rpack_path)], capsys)
+        output = json.loads(out)
+        assert isinstance(output["anchor"], str)
+        assert output["strict"] is False
+        assert output["complete"] is True
+        assert [c["name"] for c in output["checks"]] == [
+            "format", "root_digest", "signature", "chain_hash",
+            "chain_linkage", "artifacts", "coverage"]
+        for c in output["checks"]:
+            assert c["status"] in ("ok", "fail", "warn", "skipped")
+            assert isinstance(c["detail"], str)
+        statuses = {c["name"]: c["status"] for c in output["checks"]}
+        assert statuses["format"] == "ok"
+        assert statuses["root_digest"] == "ok"
+        assert statuses["signature"] == "warn"  # unsigned minimal bundle
+        assert statuses["chain_hash"] == "ok"
+        assert statuses["chain_linkage"] == "ok"
+        assert statuses["artifacts"] == "ok"
+        assert statuses["coverage"] == "ok"
+        b = output["bundle"]
+        assert set(b) == {"issue", "title", "root_digest", "public_key",
+                          "chain_length", "first_timestamp", "last_timestamp",
+                          "commit_sha", "evaluation_status"}
+        assert b["issue"] == 1
+        assert b["title"] == "Test"
+        assert b["chain_length"] == 1
+        assert isinstance(b["first_timestamp"], str)
+        assert b["first_timestamp"] == b["last_timestamp"]
+        assert b["commit_sha"] is None  # minimal chain has no finalize block
+        assert b["evaluation_status"] == "pass"
+
+    def test_checks_skipped_without_chain(self, tmp_chain_dir, capsys):
+        rpack_path, _ = self._build_minimal_bundle(tmp_chain_dir)
+        fp.chain_path("1").unlink()
+        code, out = _run_verify(["--rpack", str(rpack_path)], capsys)
+        output = json.loads(out)
+        assert code == 0
+        statuses = {c["name"]: c["status"] for c in output["checks"]}
+        assert statuses["chain_hash"] == "warn"
+        assert statuses["chain_linkage"] == "skipped"
+        b = output["bundle"]
+        assert b["chain_length"] is None
+        assert b["first_timestamp"] is None
+        assert b["last_timestamp"] is None
+        assert b["commit_sha"] is None
+
+
+class TestVerifyMarkdown:
+    """--format markdown renders the same result dict as an audit report:
+    identical exit codes to JSON mode, human-readable verdict on stdout."""
+
+    def _deploy(self, tmp_path):
+        proj = tmp_path / "proj"
+        return proj, _deploy_v12_project(proj)
+
+    def test_green_renders_verified_headline(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._deploy(tmp_path)
+        monkeypatch.chdir(proj)
+        json_code, _ = _run_verify(["--rpack", str(rpack)], capsys)
+        code, out = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert code == 0
+        assert code == json_code
+        assert "## ✅ VERIFIED" in out
+        assert "TAMPER" not in out
+        assert "incomplete" not in out.splitlines()[0]
+        # the sealed-claims disclaimer must be present verbatim
+        assert "claims recorded at signing time" in out
+        # markdown, not JSON
+        assert not out.lstrip().startswith("{")
+
+    def test_green_report_sections(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._deploy(tmp_path)
+        monkeypatch.chdir(proj)
+        _, out = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert "### Checks" in out
+        assert "### Provenance timeline" in out
+        assert "### Artifacts" in out
+        assert "src/anchored.py" in out
+        assert "### Decisions" in out
+        assert "### Evaluation (recorded claims)" in out
+        assert "Strict mode: off" in out
+
+    def test_tampered_renders_tamper_headline(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._deploy(tmp_path)
+        (proj / "src" / "anchored.py").write_text("ANSWER = 43\n",
+                                                  encoding="utf-8")
+        monkeypatch.chdir(proj)
+        json_code, _ = _run_verify(["--rpack", str(rpack)], capsys)
+        code, out = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert code == 1
+        assert code == json_code
+        assert "## ❌ TAMPER DETECTED" in out
+        assert not out.lstrip().startswith("{")
+
+    def test_strict_incomplete_renders_warning_with_failed_note(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._deploy(tmp_path)
+        (proj / "src" / "anchored.py").unlink()
+        monkeypatch.chdir(proj)
+        json_code, _ = _run_verify(["--rpack", str(rpack), "--strict"], capsys)
+        code, out = _run_verify(
+            ["--rpack", str(rpack), "--strict", "--format", "markdown"], capsys)
+        assert code == 1
+        assert code == json_code
+        # missing evidence is not tampering: the wording must not cry wolf
+        assert "## ⚠️ VERIFIED (incomplete — evidence missing)" in out
+        assert "TAMPER" not in out
+        assert "FAILED" in out
+        assert not out.lstrip().startswith("{")
+
+    def test_lenient_incomplete_renders_warning_headline(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._deploy(tmp_path)
+        (proj / "src" / "anchored.py").unlink()
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert code == 0
+        assert "## ⚠️ VERIFIED (incomplete — evidence missing)" in out
+        assert "FAILED" not in out
+
+    @staticmethod
+    def _reseal(rpack, bundle):
+        """Recompute root_digest over a mutated (unsigned) bundle so only
+        the mutation under test is visible to the verifier."""
+        bundle.pop("root_digest", None)
+        bundle.pop("signature", None)
+        bundle["root_digest"] = fp.sha256_hex(fp.canonical_json(bundle))
+        bundle["signature"] = ""
+        rpack.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+
+    def test_bundle_controlled_markdown_is_neutralized(
+            self, tmp_path, monkeypatch, capsys):
+        """The report is posted as a PR comment / job summary where bundle
+        content is attacker-controlled (fork PRs): links, images, emphasis,
+        code spans and HTML smuggled into the issue title, artifact paths or
+        decision fields must come out inert."""
+        proj, rpack = self._deploy(tmp_path)
+        bundle = json.loads(rpack.read_text(encoding="utf-8"))
+        nasty = "`backticks` [link](https://evil.example) **bold** <img>"
+        bundle["issue"]["title"] = nasty
+        bundle["artifacts"][0]["path"] = f"src/{nasty}.py"
+        bundle["decisions"][0]["context"] = nasty
+        bundle["decisions"][0]["choice"] = nasty
+        bundle["decisions"][0]["rationale"] = nasty
+        self._reseal(rpack, bundle)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert code == 0
+        # no active markdown from bundle-controlled strings survives
+        assert "[link](" not in out
+        assert "**bold**" not in out
+        assert "<img>" not in out
+        assert "`backticks`" not in out
+        # the payload is still present, backslash-escaped and readable
+        assert "\\[link\\](" in out
+        # verdict and report structure are intact (artifact path was changed
+        # to the nasty name, so the recorded file is now "missing")
+        assert "## ⚠️ VERIFIED (incomplete — evidence missing)" in out
+        assert "### Checks" in out
+        assert "### Artifacts" in out
+        assert "### Decisions" in out
+        assert "| format | ok |" in out
+
+    def test_wrong_format_renders_failed_not_tamper(
+            self, tmp_path, monkeypatch, capsys):
+        """An unrecognized format is 'cannot verify', not tamper evidence:
+        the bundle was never valid, so the report must not cry tamper."""
+        proj, rpack = self._deploy(tmp_path)
+        bundle = json.loads(rpack.read_text(encoding="utf-8"))
+        bundle["format"] = "not-forgeproof"
+        self._reseal(rpack, bundle)
+        monkeypatch.chdir(proj)
+        json_code, _ = _run_verify(["--rpack", str(rpack)], capsys)
+        code, out = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert code == 1
+        assert code == json_code
+        assert "## ❌ VERIFICATION FAILED" in out
+        assert "TAMPER" not in out
+
+
+# ---------------------------------------------------------------------------
+# v1.2.0 record guards (#6, #7)
+# ---------------------------------------------------------------------------
+
+
+class TestRecordGuards:
+    """Record-input guards: negative counts and malformed --covers specs die
+    with actionable messages (#6); a finalized chain refuses further records
+    without mutating the chain file (#7)."""
+
+    def _record(self, *argv):
+        with patch.object(fp, "get_key_path", return_value=None), patch("sys.stdout"):
+            fp.cmd_record(fp.build_parser().parse_args(["record", *argv]))
+
+    def test_negative_passed_dies(self, sample_chain, tmp_chain_dir, capsys):
+        issue, _ = sample_chain
+        with pytest.raises(SystemExit):
+            self._record("--issue", issue, "--action", "test-result",
+                         "--suite", "pytest", "--passed", "-5", "--failed", "0")
+        err = capsys.readouterr().err
+        assert "--passed" in err
+        assert "negative" in err
+
+    def test_negative_passed_with_real_failures_dies(
+            self, sample_chain, tmp_chain_dir, capsys):
+        issue, _ = sample_chain
+        with pytest.raises(SystemExit):
+            self._record("--issue", issue, "--action", "test-result",
+                         "--suite", "pytest", "--passed", "-1", "--failed", "3")
+        assert "--passed" in capsys.readouterr().err
+
+    def test_negative_failed_dies(self, sample_chain, tmp_chain_dir, capsys):
+        issue, _ = sample_chain
+        with pytest.raises(SystemExit):
+            self._record("--issue", issue, "--action", "test-result",
+                         "--suite", "pytest", "--passed", "3", "--failed", "-2")
+        assert "--failed" in capsys.readouterr().err
+
+    def test_negative_lint_errors_dies(self, sample_chain, tmp_chain_dir, capsys):
+        issue, _ = sample_chain
+        with pytest.raises(SystemExit):
+            self._record("--issue", issue, "--action", "lint-result",
+                         "--tool", "ruff", "--errors", "-1", "--warnings", "0")
+        err = capsys.readouterr().err
+        assert "--errors" in err
+        assert "negative" in err
+
+    def test_covers_empty_test_list_dies(self, sample_chain, tmp_chain_dir, capsys):
+        issue, _ = sample_chain
+        with pytest.raises(SystemExit):
+            self._record("--issue", issue, "--action", "test-result",
+                         "--suite", "pytest", "--passed", "1", "--failed", "0",
+                         "--covers", "REQ-2=")
+        err = capsys.readouterr().err
+        assert "--covers" in err
+        assert "must not contain '='" in err
+
+    def test_covers_whitespace_test_list_dies(
+            self, sample_chain, tmp_chain_dir, capsys):
+        issue, _ = sample_chain
+        with pytest.raises(SystemExit):
+            self._record("--issue", issue, "--action", "test-result",
+                         "--suite", "pytest", "--passed", "1", "--failed", "0",
+                         "--covers", "REQ-2=  , ,")
+        assert "--covers" in capsys.readouterr().err
+
+    def test_covers_empty_requirement_id_dies(
+            self, sample_chain, tmp_chain_dir, capsys):
+        issue, _ = sample_chain
+        with pytest.raises(SystemExit):
+            self._record("--issue", issue, "--action", "test-result",
+                         "--suite", "pytest", "--passed", "1", "--failed", "0",
+                         "--covers", "=name")
+        err = capsys.readouterr().err
+        assert "--covers" in err
+        assert "must not contain '='" in err
+
+    def test_guard_rejection_leaves_chain_unmodified(
+            self, sample_chain, tmp_chain_dir):
+        issue, _ = sample_chain
+        chain_file = tmp_chain_dir / f"chain-{issue}.json"
+        bytes_before = chain_file.read_bytes()
+        with pytest.raises(SystemExit):
+            self._record("--issue", issue, "--action", "test-result",
+                         "--suite", "pytest", "--passed", "-5", "--failed", "0")
+        assert chain_file.read_bytes() == bytes_before
+
+    def test_record_after_finalize_dies_chain_untouched(
+            self, tmp_chain_dir, tmp_path, monkeypatch, capsys):
+        """#7: init -> record -> finalize -> record again must die loudly and
+        must not mutate the finalized chain file."""
+        issue = "77"
+        monkeypatch.chdir(tmp_path)
+        priv = tmp_path / "key"
+        pub = tmp_path / "key.pub"
+        priv.write_text("fake_private")
+        pub.write_text("ssh-ed25519 AAAA fake")
+        (tmp_path / "art.py").write_text("a = 1\n")
+        with patch.object(fp, "generate_ephemeral_keypair", return_value=(priv, pub)), \
+             patch.object(fp, "sign_ed25519", return_value="sig"), patch("sys.stdout"):
+            fp.cmd_init(fp.build_parser().parse_args(
+                ["init", "--issue", issue, "--title", "guard", "--force"]))
+        with patch.object(fp, "get_key_path", return_value=priv), \
+             patch.object(fp, "sign_ed25519", return_value="sig"), patch("sys.stdout"):
+            fp.cmd_record(fp.build_parser().parse_args(
+                ["record", "--issue", issue, "--action", "file-edit",
+                 "--path", "art.py", "--operation", "create"]))
+        with patch.object(fp, "get_key_path", return_value=priv), \
+             patch.object(fp, "sign_ed25519", return_value="sig"), \
+             patch.object(fp, "delete_private_key"), \
+             patch.object(fp.shutil, "which", return_value=None), \
+             patch("sys.stdout"):
+            fp.cmd_finalize(fp.build_parser().parse_args(
+                ["finalize", "--issue", issue, "--commit", "0" * 40]))
+        chain_file = tmp_chain_dir / f"chain-{issue}.json"
+        bytes_before = chain_file.read_bytes()
+        with pytest.raises(SystemExit):
+            with patch.object(fp, "get_key_path", return_value=priv), \
+                 patch.object(fp, "sign_ed25519", return_value="sig"), \
+                 patch("sys.stdout"):
+                fp.cmd_record(fp.build_parser().parse_args(
+                    ["record", "--issue", issue, "--action", "decision",
+                     "--context", "c", "--choice", "x", "--rationale", "r"]))
+        assert "already finalized" in capsys.readouterr().err
+        assert chain_file.read_bytes() == bytes_before
+
+
+# ---------------------------------------------------------------------------
+# v1.2.0 detect robustness (#5-partial)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectBrokenVenv:
+    """A broken venv interpreter (0-byte python executable) must degrade to
+    runtime_available: false — `detect` must ALWAYS emit valid JSON, never an
+    OSError traceback. Subprocess pattern: the guarantee is process-level
+    (exit code + clean stderr)."""
+
+    def test_detect_survives_zero_byte_venv_python(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "broken"\n')
+        win_py = tmp_path / ".venv" / "Scripts" / "python.exe"
+        posix_py = tmp_path / ".venv" / "bin" / "python"
+        for stub in (win_py, posix_py):
+            stub.parent.mkdir(parents=True, exist_ok=True)
+            stub.write_bytes(b"")
+        os.chmod(posix_py, 0o755)  # executable-but-empty on POSIX (ENOEXEC)
+        result = subprocess.run(
+            [sys.executable, str(FORGEPROOF_PY), "detect"],
+            cwd=tmp_path, capture_output=True, text=True, timeout=60)
+        assert "Traceback (most recent call last)" not in result.stderr, (
+            f"detect raised on a broken venv interpreter:\n{result.stderr}")
+        assert result.returncode == 0, result.stderr
+        out = json.loads(result.stdout)
+        assert out["detected"] is True
+        py = next(l for l in out["languages"] if l["language"] == "python")
+        assert py["runtime_available"] is False
 
 
 # ---------------------------------------------------------------------------

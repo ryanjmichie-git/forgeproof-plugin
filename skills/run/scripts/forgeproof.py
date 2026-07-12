@@ -421,9 +421,20 @@ def find_js_tool(project_root: Path, tool: str) -> str | None:
     return shutil.which(tool)
 
 
+def _probe_ok(argv: list[str]) -> bool:
+    """Spawn an availability probe, treating an unspawnable executable as
+    unavailable. A broken venv (0-byte or truncated python binary) raises
+    OSError from subprocess — detect must degrade to runtime_available: false
+    and still emit valid JSON, never a traceback."""
+    try:
+        return run(argv).returncode == 0
+    except OSError:
+        return False
+
+
 def _python_candidates(project_root: Path, spec: dict) -> tuple[bool, list[dict], list[dict]]:
     py = find_project_python(project_root)
-    runtime_ok = run([py, "--version"]).returncode == 0
+    runtime_ok = _probe_ok([py, "--version"])
 
     def build(items: list[dict]) -> list[dict]:
         out = []
@@ -433,7 +444,7 @@ def _python_candidates(project_root: Path, spec: dict) -> tuple[bool, list[dict]
                 "name": item["name"],
                 "command": " ".join([f'"{py}"'] + item["args"]),
                 "argv": argv,
-                "ok": run([py, "-m", item["module"], "--version"]).returncode == 0,
+                "ok": _probe_ok([py, "-m", item["module"], "--version"]),
             })
         return out
 
@@ -654,6 +665,14 @@ def _record_data_from_flags(args: argparse.Namespace) -> dict:
             problems.append(f"unexpected {', '.join(extra)}")
         die(f"action '{action}' takes: {expected} ({'; '.join(problems)})")
 
+    # Counts seal into the bundle's evaluation math (sums, pass/fail status);
+    # a negative count would silently skew it, so reject at the input edge.
+    for attr in ("passed", "failed", "errors", "warnings"):
+        value = getattr(args, attr, None)
+        if value is not None and value < 0:
+            die(f"{_flag_name(attr)} must not be negative (got {value}); "
+                f"pass the real count, e.g. {_flag_name(attr)} 0")
+
     if action == "branch-create":
         return {"branch": args.branch, "base": args.base, "base_sha": args.base_sha}
 
@@ -691,6 +710,17 @@ def _record_data_from_flags(args: argparse.Namespace) -> dict:
                 die(f"--covers must look like REQ-1=test_a,test_b (got: {spec_str})")
             req_id, tests = spec_str.split("=", 1)
             names = [t.strip() for t in tests.split(",") if t.strip()]
+            # An empty id or test list would seal vacuous coverage into the
+            # bundle (a "" requirement, or a requirement covered by zero
+            # tests) and inflate the coverage percentage.
+            if not req_id.strip():
+                die(f"--covers requirement id is empty (got: {spec_str!r}); "
+                    f"expected REQ-1=test_a,test_b — note requirement ids "
+                    f"must not contain '='")
+            if not names:
+                die(f"--covers test list is empty (got: {spec_str!r}); "
+                    f"expected REQ-1=test_a,test_b — note requirement ids "
+                    f"must not contain '='")
             coverage.setdefault(req_id.strip(), []).extend(names)
         return {
             "suite": args.suite,
@@ -708,6 +738,11 @@ def cmd_record(args: argparse.Namespace) -> None:
     """Record a new block in the chain."""
     issue = args.issue
     chain = load_chain(issue)
+    # A finalized chain is sealed: its hash is embedded in the signed bundle,
+    # so appending anything would only guarantee a chain-hash mismatch at
+    # verify time. Refuse before touching the file.
+    if chain and chain[-1].get("action") == "finalize":
+        die("chain already finalized; run init --force to start over")
     data = _record_data_from_flags(args)
 
     last_block = chain[-1]
@@ -960,23 +995,190 @@ def cmd_finalize(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Prefix marking missing-evidence errors appended under --strict; the
+# renderer filters on it to keep strict failures out of the tamper verdict.
+STRICT_PREFIX = "[strict] "
+
+# Substrings identifying tamper-class integrity errors — positive evidence
+# of alteration, as opposed to "cannot verify" errors (unknown format, a
+# signature field that was never verifiable). Must be kept in sync with the
+# error strings cmd_verify appends.
+TAMPER_ERROR_MARKERS = (
+    "Root digest mismatch",
+    "signature verification FAILED",
+    "Chain hash mismatch",
+    "hash mismatch",
+    "prev_hash",
+    "Artifact tampered",
+    "Artifact is not a file",
+    "trailing or altered",
+)
+
+
+def _render_verify_markdown(result: dict, bundle: dict,
+                            chain_blocks: list | None,
+                            artifact_rows: list[dict]) -> str:
+    """Render the verify result as a human-readable audit report.
+
+    Same data, second view: cmd_verify builds one result dict and either
+    dumps it as JSON or renders it here — there is no separate markdown
+    verification pass. The verdict wording distinguishes tampering (a
+    TAMPER_ERROR_MARKERS match) from unverifiable input and from missing
+    evidence: a strict-mode failure whose only errors are STRICT_PREFIX
+    missing-evidence entries must not cry tamper."""
+    def md_cell(value: Any) -> str:
+        """Neutralize bundle-controlled text for markdown output: this
+        report lands in PR comments / job summaries where bundle content
+        is attacker-controlled, so backslash-escape everything that could
+        form links, images, emphasis, code spans, or HTML, and keep cells
+        to one line. Engine-generated literals (check names, statuses,
+        headings) are rendered directly and stay unescaped."""
+        text = str(value).replace("\\", "\\\\")
+        for ch in "`[]*_<>|":
+            text = text.replace(ch, "\\" + ch)
+        return text.replace("\r", " ").replace("\n", " ")
+
+    integrity_errors = [e for e in result["errors"]
+                        if not e.startswith(STRICT_PREFIX)]
+    tampered = any(marker in err for err in integrity_errors
+                   for marker in TAMPER_ERROR_MARKERS)
+    lines: list[str] = []
+    # Verdict emoji as \u escapes: some of their raw UTF-8 bytes (0x8F, 0x9D)
+    # are undefined in cp1252, and this source file must stay decodable under
+    # a legacy-codepage read_text() (stdout itself is reconfigured to UTF-8
+    # in main(), so the rendered report is always real UTF-8).
+    if integrity_errors and tampered:
+        lines.append("## \u274c TAMPER DETECTED")
+    elif integrity_errors:
+        lines.append("## \u274c VERIFICATION FAILED")
+    elif result["verified"] and result["complete"]:
+        lines.append("## \u2705 VERIFIED")
+    else:
+        lines.append("## \u26a0\ufe0f VERIFIED (incomplete — evidence missing)")
+        if not result["verified"]:
+            lines += ["", "**FAILED under --strict:** required evidence is "
+                          "missing, so this verification does not pass."]
+
+    binfo = result["bundle"]
+    if binfo.get("issue") is not None or binfo.get("title"):
+        lines += ["", f"**Bundle:** issue #{md_cell(binfo.get('issue'))} — "
+                      f"{md_cell(binfo.get('title') or '(untitled)')}"]
+
+    lines += ["", "### Checks", "", "| Check | Status | Detail |",
+              "|---|---|---|"]
+    for c in result["checks"]:
+        lines.append(f"| {c['name']} | {c['status']} | {md_cell(c['detail'])} |")
+
+    if chain_blocks is not None:
+        lines += ["", "### Provenance timeline", "",
+                  "| # | Action | Timestamp |", "|---|---|---|"]
+        for block in chain_blocks:
+            if isinstance(block, dict):
+                lines.append(f"| {md_cell(block.get('index'))} "
+                             f"| {md_cell(block.get('action'))} "
+                             f"| {md_cell(block.get('timestamp'))} |")
+            else:
+                lines.append("| ? | (malformed block) | ? |")
+
+    lines += ["", "### Artifacts", ""]
+    if artifact_rows:
+        lines += ["| Path | SHA-256 | Status |", "|---|---|---|"]
+        for row in artifact_rows:
+            sha = md_cell(str(row["sha256"])[:16])
+            lines.append(f"| `{md_cell(row['path'])}` | `{sha}` "
+                         f"| {row['status']} |")
+    else:
+        lines.append("_No artifacts recorded in this bundle._")
+
+    decisions = bundle.get("decisions")
+    lines += ["", "### Decisions", ""]
+    if isinstance(decisions, list) and decisions:
+        for d in decisions:
+            if isinstance(d, dict):
+                lines.append(f"- **{md_cell(d.get('context', ''))}** — "
+                             f"{md_cell(d.get('choice', ''))} "
+                             f"({md_cell(d.get('rationale', ''))})")
+    else:
+        lines.append("_No decisions recorded in this bundle._")
+
+    evaluation = bundle.get("evaluation")
+    ev = evaluation if isinstance(evaluation, dict) else {}
+    lines += ["", "### Evaluation (recorded claims)", "",
+              "> These are the claims recorded at signing time; verification "
+              "proves they are unaltered, not that they are true.", "",
+              f"- Status: {md_cell(ev.get('status', 'unknown'))}",
+              f"- Tests passed: {md_cell(ev.get('tests_passed', 'n/a'))}",
+              f"- Tests failed: {md_cell(ev.get('tests_failed', 'n/a'))}",
+              f"- Lint errors: {md_cell(ev.get('lint_errors', 'n/a'))}",
+              f"- Requirement coverage: "
+              f"{md_cell(ev.get('requirement_coverage', 'n/a'))}"]
+
+    lines += ["", "---",
+              f"Strict mode: {'on' if result['strict'] else 'off'} · "
+              f"Complete: {'yes' if result['complete'] else 'no'} · "
+              f"Anchor: `{result['anchor']}`"]
+    return "\n".join(lines)
+
+
+def resolve_verify_anchor(rpack_path: Path, project_root: str | None) -> Path:
+    """Directory that verification paths are resolved against.
+
+    An explicit --project-root always wins. Otherwise a bundle sitting in a
+    .forgeproof/ directory anchors to that directory's parent (the project
+    root it was signed in), and a bare bundle anchors to its own directory.
+    cmd_verify falls back to cwd-relative resolution whenever a path is not
+    found at the anchor, so every pre-v1.2.0 layout (cwd == anchor) behaves
+    exactly as before."""
+    if isinstance(project_root, str) and project_root:
+        return Path(project_root)
+    parent = rpack_path.parent
+    if parent.name == ".forgeproof":
+        return parent.parent
+    return parent
+
+
 def cmd_verify(args: argparse.Namespace) -> None:
     """Verify a .rpack bundle's integrity."""
     rpack_path = Path(args.rpack)
     if not rpack_path.is_file():
         die(f"Bundle not found (or not a file): {rpack_path}")
 
+    # v1.2.0 flags, shape-checked: cmd_verify is also driven in-process by
+    # tests with partial namespaces (MagicMock args), and only well-typed
+    # values may activate the new behavior.
+    project_root = getattr(args, "project_root", None)
+    if not isinstance(project_root, str):
+        project_root = None
+    strict = getattr(args, "strict", None) is True
+    out_format = "markdown" if getattr(args, "format", None) == "markdown" else "json"
+
     bundle = read_json_file(rpack_path, "bundle")
     if not isinstance(bundle, dict):
         die(f"bundle is not a JSON object: {rpack_path}")
     errors: list[str] = []
     warnings: list[str] = []
+    checks: list[dict] = []
+
+    def check(name: str, status: str, detail: str = "") -> None:
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    anchor = resolve_verify_anchor(rpack_path, project_root)
+    info(f"Verify anchor: {anchor}")
 
     # 1. Check format and version
-    if bundle.get("format") != RPACK_FORMAT:
+    format_ok = bundle.get("format") == RPACK_FORMAT
+    version_ok = bundle.get("version") == RPACK_VERSION
+    if not format_ok:
         errors.append(f"Unknown format: {bundle.get('format')}")
-    if bundle.get("version") != RPACK_VERSION:
+    if not version_ok:
         warnings.append(f"Version mismatch: expected {RPACK_VERSION}, got {bundle.get('version')}")
+    if not format_ok:
+        check("format", "fail", f"Unknown format: {bundle.get('format')}")
+    elif not version_ok:
+        check("format", "warn",
+              f"Version mismatch: expected {RPACK_VERSION}, got {bundle.get('version')}")
+    else:
+        check("format", "ok", f"{RPACK_FORMAT} v{RPACK_VERSION}")
 
     # 2. Verify root digest
     stored_digest = bundle.get("root_digest", "")
@@ -989,14 +1191,19 @@ def cmd_verify(args: argparse.Namespace) -> None:
 
     if computed_digest != stored_digest:
         errors.append(f"Root digest mismatch: computed {computed_digest[:16]}..., stored {stored_digest[:16]}...")
+        check("root_digest", "fail",
+              f"computed {computed_digest[:16]}..., stored {str(stored_digest)[:16]}...")
     else:
         info("Root digest: OK")
+        check("root_digest", "ok", "recomputed digest matches bundle content")
 
     # 3. Verify signature
     if not isinstance(stored_signature, str):
         errors.append("Signature field is not a string")
+        check("signature", "fail", "Signature field is not a string")
     elif stored_signature and public_key:
-        if not signature_is_canonical(stored_signature):
+        canonical_ok = signature_is_canonical(stored_signature)
+        if not canonical_ok:
             errors.append("Signature field has trailing or altered data "
                           "(not canonical SSHSIG)")
         sig_ok = verify_signature(stored_digest, stored_signature, public_key)
@@ -1004,23 +1211,44 @@ def cmd_verify(args: argparse.Namespace) -> None:
             errors.append("Ed25519 signature verification FAILED")
         elif not errors:
             info("Signature: OK")
+        if canonical_ok and sig_ok:
+            check("signature", "ok", "Ed25519 signature valid for stored root digest")
+        elif not sig_ok:
+            check("signature", "fail", "Ed25519 signature verification FAILED")
+        else:
+            check("signature", "fail", "signature not canonical SSHSIG")
     elif not stored_signature:
         warnings.append("No signature present in bundle")
+        check("signature", "warn", "No signature present in bundle")
+    else:
+        check("signature", "skipped", "no public key in bundle to verify against")
 
-    # 4. Verify chain hash
+    # 4. Verify chain hash. The chain file resolves against the anchor first
+    # (bundle-relative layouts verify from any cwd), falling back to the
+    # pre-v1.2.0 cwd-relative path so existing layouts are untouched.
     issue_field = bundle.get("issue")
     issue_num = str(issue_field.get("number", "")) if isinstance(issue_field, dict) else ""
-    chain_file = chain_path(issue_num) if issue_num else None
-    if chain_file and chain_file.is_file():
+    if issue_num:
+        anchored_chain = anchor / chain_path(issue_num)
+        chain_file = anchored_chain if anchored_chain.is_file() else chain_path(issue_num)
+    else:
+        chain_file = None
+    chain_found = bool(chain_file and chain_file.is_file())
+    chain_blocks: list | None = None
+    if chain_found:
         actual_chain_hash = sha256_hex(chain_file.read_text())
         if actual_chain_hash != bundle.get("chain_hash"):
             errors.append(f"Chain hash mismatch: chain file has been modified since bundle was signed")
+            check("chain_hash", "fail",
+                  "chain file has been modified since bundle was signed")
         else:
             info("Chain hash: OK")
+            check("chain_hash", "ok", "chain file matches sealed chain_hash")
 
         # 5. Verify chain integrity (block linkage). A corrupt chain that still
         # matched chain_hash is impossible, but a corrupt chain alongside an
         # intact bundle must fail closed, not traceback.
+        linkage_start = len(errors)
         chain = read_json_file(chain_file, f"chain for issue {issue_num}")
         if not isinstance(chain, list):
             errors.append("Chain file is corrupt (not a list of blocks)")
@@ -1047,16 +1275,37 @@ def cmd_verify(args: argparse.Namespace) -> None:
                 errors.append(f"Block {i}: hash mismatch (block has been tampered with)")
 
         info(f"Chain integrity: verified {len(chain)} blocks")
+        linkage_errors = errors[linkage_start:]
+        if linkage_errors:
+            check("chain_linkage", "fail", "; ".join(linkage_errors[:3]))
+        else:
+            check("chain_linkage", "ok", f"verified {len(chain)} blocks")
+        chain_blocks = chain
     else:
-        warnings.append(f"Chain file not found ({chain_file}). Cannot verify chain integrity. "
-                        "This is normal if verifying a bundle from another repository.")
+        missing_msg = (f"Chain file not found ({chain_file}). Cannot verify chain integrity. "
+                       "This is normal if verifying a bundle from another repository.")
+        if strict:
+            errors.append(STRICT_PREFIX + missing_msg)
+            check("chain_hash", "fail", STRICT_PREFIX + missing_msg)
+        else:
+            warnings.append(missing_msg)
+            check("chain_hash", "warn", missing_msg)
+        check("chain_linkage", "skipped", "no chain file to verify")
 
-    # 6. Verify artifact hashes
+    # 6. Verify artifact hashes. Each artifact resolves against the anchor
+    # first, falling back to the pre-v1.2.0 cwd-relative path.
     artifacts_checked = 0
     artifacts_missing = 0
     artifacts_tampered = 0
+    artifact_rows: list[dict] = []
     for artifact in bundle.get("artifacts", []):
-        artifact_path = Path(artifact["path"])
+        recorded_path = Path(artifact["path"])
+        anchored_artifact = anchor / recorded_path
+        # Deliberate asymmetry: the chain path uses is_file() with a cwd
+        # fallback; exists() here makes a directory squatting at the anchored
+        # path resolve to it and fail closed below as "not a file".
+        artifact_path = anchored_artifact if anchored_artifact.exists() else recorded_path
+        row_status = "checked"
         if artifact_path.is_file():
             try:
                 actual_hash = sha256_file(artifact_path)
@@ -1065,23 +1314,46 @@ def cmd_verify(args: argparse.Namespace) -> None:
                 # so it's an error, never a crash.
                 errors.append(f"Artifact unreadable: {artifact['path']} ({e})")
                 artifacts_tampered += 1
+                artifact_rows.append({"path": artifact["path"],
+                                      "sha256": artifact.get("sha256", ""),
+                                      "status": "tampered"})
                 continue
             if actual_hash != artifact["sha256"]:
                 errors.append(f"Artifact tampered: {artifact['path']} hash mismatch")
                 artifacts_tampered += 1
+                row_status = "tampered"
             artifacts_checked += 1
         elif artifact_path.exists():
             # Path exists but is not a regular file (e.g. replaced by a dir).
             errors.append(f"Artifact is not a file: {artifact['path']}")
             artifacts_tampered += 1
+            row_status = "tampered"
         else:
-            warnings.append(f"Artifact not found: {artifact['path']}")
+            missing_msg = f"Artifact not found: {artifact['path']}"
+            if strict:
+                errors.append(STRICT_PREFIX + missing_msg)
+            else:
+                warnings.append(missing_msg)
             artifacts_missing += 1
+            row_status = "missing"
+        artifact_rows.append({"path": artifact["path"],
+                              "sha256": artifact.get("sha256", ""),
+                              "status": row_status})
 
     if artifacts_checked > 0:
         info(f"Artifacts: verified {artifacts_checked} files")
     if artifacts_missing > 0:
         info(f"Artifacts: {artifacts_missing} files not found (may be in a different checkout)")
+
+    if artifacts_tampered > 0:
+        check("artifacts", "fail",
+              f"{artifacts_tampered} tampered/unreadable, {artifacts_checked} checked, "
+              f"{artifacts_missing} missing")
+    elif artifacts_missing > 0:
+        check("artifacts", "fail" if strict else "warn",
+              f"{artifacts_missing} missing, {artifacts_checked} checked")
+    else:
+        check("artifacts", "ok", f"{artifacts_checked} artifacts checked")
 
     # 7. Check requirement coverage
     eval_info = bundle.get("evaluation", {})
@@ -1089,9 +1361,43 @@ def cmd_verify(args: argparse.Namespace) -> None:
     uncovered = eval_info.get("uncovered_requirements", [])
     if uncovered:
         warnings.append(f"Uncovered requirements: {', '.join(uncovered)}")
+        check("coverage", "warn", f"Uncovered requirements: {', '.join(uncovered)}")
+    else:
+        check("coverage", "ok",
+              f"requirement coverage {eval_info.get('requirement_coverage', 'n/a')}")
 
-    # Build result
+    # Bundle summary (recorded claims + chain metadata when available)
+    commit_sha = None
+    first_timestamp = last_timestamp = None
+    chain_length = None
+    if chain_blocks is not None:
+        chain_length = len(chain_blocks)
+        if chain_blocks:
+            first = chain_blocks[0]
+            last = chain_blocks[-1]
+            first_timestamp = first.get("timestamp") if isinstance(first, dict) else None
+            last_timestamp = last.get("timestamp") if isinstance(last, dict) else None
+        for block in reversed(chain_blocks):
+            if isinstance(block, dict) and block.get("action") == "finalize":
+                data = block.get("data")
+                commit_sha = data.get("commit_sha") if isinstance(data, dict) else None
+                break
+    bundle_summary = {
+        "issue": issue_field.get("number") if isinstance(issue_field, dict) else None,
+        "title": issue_field.get("title") if isinstance(issue_field, dict) else None,
+        "root_digest": stored_digest,
+        "public_key": public_key,
+        "chain_length": chain_length,
+        "first_timestamp": first_timestamp,
+        "last_timestamp": last_timestamp,
+        "commit_sha": commit_sha,
+        "evaluation_status": eval_status,
+    }
+
+    # Build result: the seven pre-v1.2.0 keys first, in their frozen order
+    # and with their frozen values, then the additive v1.2.0 keys.
     verified = len(errors) == 0
+    complete = chain_found and artifacts_missing == 0
     result = {
         "verified": verified,
         "evaluation_status": eval_status,
@@ -1100,8 +1406,16 @@ def cmd_verify(args: argparse.Namespace) -> None:
         "artifacts_checked": artifacts_checked,
         "artifacts_missing": artifacts_missing,
         "artifacts_tampered": artifacts_tampered,
+        "anchor": str(anchor),
+        "strict": strict,
+        "complete": complete,
+        "checks": checks,
+        "bundle": bundle_summary,
     }
-    print(json.dumps(result, indent=2))
+    if out_format == "markdown":
+        print(_render_verify_markdown(result, bundle, chain_blocks, artifact_rows))
+    else:
+        print(json.dumps(result, indent=2))
     sys.exit(0 if verified else 1)
 
 
@@ -1505,6 +1819,15 @@ def build_parser() -> argparse.ArgumentParser:
     # verify
     p = sub.add_parser("verify", help="Verify a .rpack bundle")
     p.add_argument("--rpack", required=True, help="Path to .rpack file")
+    p.add_argument("--project-root",
+                   help="Resolve chain/artifact paths against this directory "
+                        "(default: inferred from the bundle's location)")
+    p.add_argument("--strict", action="store_true",
+                   help="Treat missing evidence (chain file, artifacts) as "
+                        "errors instead of warnings")
+    p.add_argument("--format", choices=["json", "markdown"], default="json",
+                   help="Output format: machine-readable JSON (default) or "
+                        "a markdown audit report")
 
     # summary
     p = sub.add_parser("summary", help="Output PR-ready summary")
