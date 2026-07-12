@@ -1,0 +1,74 @@
+[
+  {
+    "index": 0,
+    "timestamp": "2026-07-12T05:36:36.601639+00:00",
+    "action": "genesis",
+    "data": {
+      "issue": 998,
+      "title": "v110 fixture",
+      "requirements": [
+        "REQ-1: fixture requirement"
+      ]
+    },
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "hash": "151a3254ebdee0b32b6ab1d69ec1aa494b8ec8f4d20ec5334cfb44d537579e88",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrM4hk1phNdwf2rDuyYYUDf6t9K\nbZpKytSXCcX1j0NFAAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEAE39wScNnI7bh5zpOFNhswwAoQXBagNzoSWBKk8DLkg4zqy+17C18wmS\nPEa08ijTrXz8nTbD4HAJBqrMXOwF0C\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 1,
+    "timestamp": "2026-07-12T05:36:36.693774+00:00",
+    "action": "file-edit",
+    "data": {
+      "path": "src/example2.py",
+      "operation": "create",
+      "sha256": "a859096dbcc30a959fcd2d46b36703a7482c0cd2f5c50a977341b0cd630560ff"
+    },
+    "prev_hash": "151a3254ebdee0b32b6ab1d69ec1aa494b8ec8f4d20ec5334cfb44d537579e88",
+    "hash": "0d5d634c922e1d24c58f63ff5e03710032f8f66462e955c754e0b907b033653b",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrM4hk1phNdwf2rDuyYYUDf6t9K\nbZpKytSXCcX1j0NFAAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEB1LscEek+GBD7qEZTC1yPWURXLRIiZGrHSJKDpYtCp3sPIAGseDbHFq7\noIST+ywjPbX4NmHWa0b4yVl3SXB40K\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 2,
+    "timestamp": "2026-07-12T05:36:36.786248+00:00",
+    "action": "decision",
+    "data": {
+      "context": "c",
+      "choice": "x",
+      "rationale": "r"
+    },
+    "prev_hash": "0d5d634c922e1d24c58f63ff5e03710032f8f66462e955c754e0b907b033653b",
+    "hash": "b8686559431828e2bcbbf1811c39426fc88571fde4ffc3e8cf103fcf0df1f497",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrM4hk1phNdwf2rDuyYYUDf6t9K\nbZpKytSXCcX1j0NFAAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEBTvQw8/q/p0X5Kdnn1iYr9xcOI7KtaYxO9a+/XgljTGMScEspUlNAU8V\nimJZUHudG3HeXpJAyV7JuexmHifsQF\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 3,
+    "timestamp": "2026-07-12T05:36:36.880614+00:00",
+    "action": "test-result",
+    "data": {
+      "suite": "fixture",
+      "passed": 1,
+      "failed": 0,
+      "coverage": {
+        "REQ-1": [
+          "test_fixture"
+        ]
+      },
+      "failed_tests": []
+    },
+    "prev_hash": "b8686559431828e2bcbbf1811c39426fc88571fde4ffc3e8cf103fcf0df1f497",
+    "hash": "c445ea5c1c36f11cd843cc6b8d80e61a104b4829d8f5cbe3d25feab3124ac59c",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrM4hk1phNdwf2rDuyYYUDf6t9K\nbZpKytSXCcX1j0NFAAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEAPXA5cFSy8O4M9+yLbD7N8no+yELcunXPCa83R0eeNZOVZPntSEXFvYS\ndn7HsumkafpB40DLNn5fZEzgiSbp8O\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 4,
+    "timestamp": "2026-07-12T05:36:36.973636+00:00",
+    "action": "finalize",
+    "data": {
+      "commit_sha": "0000000000000000000000000000000000000000",
+      "chain_length": 5
+    },
+    "prev_hash": "c445ea5c1c36f11cd843cc6b8d80e61a104b4829d8f5cbe3d25feab3124ac59c",
+    "hash": "b112101d02632edc05390867a603b17fc4b056b72a0c7ce64973ef397d69f838",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrM4hk1phNdwf2rDuyYYUDf6t9K\nbZpKytSXCcX1j0NFAAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEDit8dEebpE9dqv6LgFtSH1LFNPnsCMFY4GkxzTQjNE/O7kRQcH5I8abw\n4stZ2BhuBIMPXpIVBBxw8OZEREp/QO\n-----END SSH SIGNATURE-----"
+  }
+]

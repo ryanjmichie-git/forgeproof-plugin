@@ -214,6 +214,64 @@ def lifecycle(rec: Recorder, scenario: str, interp_name: str, exe: str,
                f"artifacts_checked={out['artifacts_checked']} expected {len(artifacts)}")
     c("verify: green on untouched state", do_verify_green)
 
+    def do_verify_strict_green():
+        p = engine(exe, ["verify", "--strict", "--rpack",
+                         str(rpack_path.relative_to(proj))], proj)
+        expect(p.returncode == 0,
+               f"strict verify rc={p.returncode}: {p.stdout[:300]}")
+        out = parse_json(p.stdout, "verify --strict")
+        expect(out["verified"] is True and out["errors"] == [],
+               f"strict not verified: {out['errors']}")
+        expect(out["strict"] is True, "strict flag not echoed in output")
+        expect(out["complete"] is True,
+               f"complete={out.get('complete')} with all evidence present")
+    c("verify --strict: green when evidence complete", do_verify_strict_green)
+
+    def do_verify_markdown():
+        p = engine(exe, ["verify", "--format", "markdown", "--rpack",
+                         str(rpack_path.relative_to(proj))], proj)
+        expect(p.returncode == 0,
+               f"markdown verify rc={p.returncode}: {p.stdout[:300]}")
+        expect("VERIFIED" in p.stdout,
+               f"markdown verdict missing: {p.stdout[:200]}")
+        expect("�" not in p.stdout,
+               "markdown output is not clean UTF-8 (replacement char seen)")
+        expect(not p.stdout.lstrip().startswith("{"),
+               "markdown mode emitted JSON")
+    c("verify --format markdown: renders verdict, UTF-8 clean",
+      do_verify_markdown)
+
+    def do_strict_incomplete():
+        victim = proj / artifacts[-1]
+        stashed = victim.with_name(victim.name + ".stashed")
+        victim.rename(stashed)
+        try:
+            p = engine(exe, ["verify", "--rpack",
+                             str(rpack_path.relative_to(proj))], proj)
+            expect(p.returncode == 0,
+                   f"lenient verify with missing artifact must exit 0, "
+                   f"got {p.returncode}: {p.stdout[:200]}")
+            out = parse_json(p.stdout, "verify (missing artifact)")
+            expect(out["artifacts_missing"] >= 1,
+                   f"artifacts_missing={out['artifacts_missing']} expected >=1")
+            expect(out["complete"] is False,
+                   "complete must be false with a missing artifact")
+            p = engine(exe, ["verify", "--strict", "--rpack",
+                             str(rpack_path.relative_to(proj))], proj)
+            expect(p.returncode == 1,
+                   f"strict verify with missing artifact must exit 1, "
+                   f"got {p.returncode}")
+            out = parse_json(p.stdout, "verify --strict (missing artifact)")
+            expect(any(e.startswith("[strict] ") for e in out["errors"]),
+                   f"expected a [strict] error, got {out['errors']}")
+        finally:
+            stashed.rename(victim)
+        p = engine(exe, ["verify", "--rpack",
+                         str(rpack_path.relative_to(proj))], proj)
+        expect(p.returncode == 0, "restore did not return verify to green")
+    c("strict: missing artifact -> lenient 0 / strict 1, restores green",
+      do_strict_incomplete)
+
     def tamper_case(name, mutate, restore, expected_error):
         def fn():
             mutate()
@@ -225,6 +283,13 @@ def lifecycle(rec: Recorder, scenario: str, interp_name: str, exe: str,
                 expect(out["verified"] is False, "verified must be false")
                 expect(any(expected_error in e for e in out["errors"]),
                        f"expected '{expected_error}' in {out['errors']}")
+                # strict must never be laxer than lenient: still red while
+                # tampered
+                p = engine(exe, ["verify", "--strict", "--rpack",
+                                 str(rpack_path.relative_to(proj))], proj)
+                expect(p.returncode == 1,
+                       f"strict verify while tampered must exit 1, "
+                       f"got {p.returncode}")
             finally:
                 restore()
             p = engine(exe, ["verify", "--rpack",

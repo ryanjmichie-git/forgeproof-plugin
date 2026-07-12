@@ -2,6 +2,68 @@
 
 All notable changes to ForgeProof are documented in this file.
 
+## [1.2.0] - 2026-07-12
+
+"Verification by default": every PR that carries a ForgeProof bundle can now
+be mechanically verified — a companion GitHub Action turns tamper or missing
+evidence into a red check, and the run/push skills now guarantee the sealed
+bundle is actually in the branch being verified. Bundle format unchanged —
+every v1.0.x and v1.1.x `.rpack` still verifies, enforced by two frozen
+fixtures in CI (v1.0.1 and v1.1.0).
+
+### Fixed
+
+- **The signed bundle never landed in the pushed branch.** The run skill
+  committed the working tree *before* finalize produced the `.rpack`, so the
+  bundle only ever existed locally — the workflow hole that would have made
+  PR verification vacuous. The run skill now makes a post-finalize seal
+  commit, and push refuses to proceed unless the bundle is committed at HEAD.
+- `record` rejects negative `--passed`/`--failed`/`--errors`/`--warnings`
+  counts and malformed `--covers` specs instead of sealing nonsense into the
+  chain (issue #6).
+- `record` refuses to append to a finalized chain instead of silently
+  extending evidence that was already signed (issue #7).
+- `detect` no longer crashes on a broken virtualenv interpreter — it falls
+  back past a venv whose Python is missing or non-executable (issue #5,
+  partial).
+
+### Added
+
+- **`verify --strict` and the `complete` output key** — verification now
+  answers two questions separately: *integrity* (was anything that could be
+  checked tampered with?) and *completeness* (is the chain and every recorded
+  artifact actually present?). Lenient mode warns on missing evidence;
+  `--strict` makes it red (issue #9).
+- **`verify --project-root` and bundle-anchored path resolution** — artifact
+  paths resolve relative to the bundle's location first, so a bundle
+  verifies from any working directory (issue #8).
+- **Structured verify JSON**: per-check `checks` array and a `bundle`
+  metadata object alongside the legacy keys.
+- **`verify --format markdown`** — a human audit report suitable for PR
+  display, hardened against markdown/HTML injection from bundle-controlled
+  strings.
+- **forgeproof-verify GitHub Action** (companion repo:
+  [ryanjmichie-git/forgeproof-verify](https://github.com/ryanjmichie-git/forgeproof-verify)) —
+  verifies the bundle in a checked-out PR, writes the audit report to the job
+  summary and as an upserted PR comment, red on tamper or missing evidence.
+  This repo dogfoods it (`.github/workflows/verify-provenance.yml`), and
+  `docs/branch-protection.md` is the consumer recipe: required-check setup
+  (rulesets and classic), the `forgeproof/*` head-branch selectivity pattern,
+  and fork-PR behavior.
+- **v1.1.0 compatibility fixture** frozen in the repo with `TestV110Compat` —
+  the forever contract now has two enforcement points (v1.0.1 and v1.1.0).
+- README badges for CI and the companion Action.
+
+### Changed
+
+- `verify` JSON output gains new keys (`complete`, `checks`, `bundle`,
+  `anchor`, `strict`). The legacy seven keys are byte-identical and all exit
+  codes are unchanged; the new keys are purely additive, so consumers reading
+  specific keys are unaffected, but whole-output comparisons will see the
+  new keys.
+- The push skill's PR template now mentions that bundles are verified
+  automatically on PRs via the forgeproof-verify Action.
+
 ## [1.1.0] - 2026-07-03
 
 "Runs everywhere": macOS, Windows (Git Bash and PowerShell), and minimal

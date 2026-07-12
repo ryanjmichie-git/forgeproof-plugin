@@ -211,10 +211,23 @@ This command:
 - Signs the bundle with the ephemeral Ed25519 key
 - Deletes the private key
 
+**Seal the bundle into the branch.** The commit above was made before
+finalize, so it contains neither the `.rpack` bundle nor the finalize block.
+Commit them as a second, plain commit:
+```
+git add .forgeproof/ && git commit -m "forgeproof(#$ISSUE): seal provenance bundle"
+```
+Confirm with `git cat-file -e HEAD:.forgeproof/issue-$ISSUE.rpack` (must exit 0).
+Do NOT use `--amend`: finalize recorded `commit_sha` as the work commit's SHA,
+and amending would replace that commit with a new SHA, orphaning the recorded
+linkage — the same class of break as the documented post-rebase mismatch.
+
 Report the result to the user. Include:
 - The evaluation status (pass / partial / fail)
 - The requirement coverage summary
-- The path to the `.rpack` file
+- The path to the `.rpack` file, and that it is committed on the branch — the
+  branch ends in two commits: the work commit the bundle references, then the
+  seal commit that carries the bundle
 - Next step: run `/forgeproof:push` to create a PR, or `/forgeproof:verify` to verify the bundle
 
 ## Reference Documentation

@@ -1,0 +1,24 @@
+# Verify ForgeProof provenance bundles on pull requests (dogfooding the
+# companion forgeproof-verify Action). The job only runs on PRs whose head
+# branch is forgeproof/* — on every other PR the required check is *skipped*,
+# and GitHub counts a skipped required check as satisfied, so human PRs merge
+# freely while forgeproof branches must carry a verifiable bundle.
+# Setup recipe: docs/branch-protection.md
+name: Verify Provenance
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  verify:
+    # Stable literal — this is the name to require in branch protection.
+    name: forgeproof-verify
+    runs-on: ubuntu-latest
+    if: startsWith(github.head_ref, 'forgeproof/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ryanjmichie-git/forgeproof-verify@633444e1d77925dfb544c5f146c3289e4ebfd598 # v1.0.0

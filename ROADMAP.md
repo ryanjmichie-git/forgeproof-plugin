@@ -2,7 +2,7 @@
 
 **Thesis:** Don't certify the model — attest the work. As AI authors more of the world's code, a verifiable record of *what the AI did, who authorized it, and whether it changed since* stops being a nice-to-have and becomes infrastructure. Every release below advances one layer of that trust stack.
 
-*Last updated: 2026-07-03 · Maintainer: [@ryanjmichie-git](https://github.com/ryanjmichie-git) · Shipped details live in [CHANGELOG.md](CHANGELOG.md)*
+*Last updated: 2026-07-12 · Maintainer: [@ryanjmichie-git](https://github.com/ryanjmichie-git) · Shipped details live in [CHANGELOG.md](CHANGELOG.md)*
 
 This roadmap is directional, not a contract. Order is firm; timing is not. To influence it, open an issue or a discussion.
 
@@ -59,7 +59,7 @@ Fixed the two launch-critical hook bugs: missing top-level `hooks` wrapper in `h
 
 ---
 
-### 🧭 v1.2.0 — Verification by default
+### ✅ v1.2.0 — Verification by default
 
 **Narrative.** Provenance nobody checks is theater. Today, verifying a bundle is something a diligent person *can* do; v1.2.0 makes it something that *happens* — a red/green check on every PR, enforceable via branch protection. This is the release where "who's allowed to merge AI-written fixes?" gets a mechanical answer: changes whose provenance verifies.
 
