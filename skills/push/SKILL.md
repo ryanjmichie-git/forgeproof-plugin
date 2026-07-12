@@ -37,14 +37,30 @@ git branch --list 'forgeproof/*' --sort=-committerdate
 Pick the most recent one (or ask the user if multiple exist). Set `$ISSUE`
 to the issue number.
 
-## Step 2 — Verify bundle exists
+If `forgeproof/$ISSUE` is not the current branch, check it out before
+continuing: `git checkout forgeproof/$ISSUE` — Steps 2-5 operate on the HEAD
+of this branch.
 
-Check that a finalized `.rpack` bundle exists:
+## Step 2 — Verify bundle is committed at HEAD
+
+The signed bundle must be part of the branch itself, not just the working
+tree — otherwise the pushed PR head has no provenance. Check:
 ```
-ls .forgeproof/issue-$ISSUE.rpack
+git cat-file -e HEAD:.forgeproof/issue-$ISSUE.rpack
 ```
 
-If it does not exist, tell the user to run `/forgeproof:run $ISSUE` first.
+Success (exit 0) means the bundle is committed at HEAD — continue to Step 3.
+
+If the check fails:
+- If `.forgeproof/issue-$ISSUE.rpack` exists on disk but is not committed,
+  run the sealing commit from the run skill's Phase 4:
+  ```
+  git add .forgeproof/ && git commit -m "forgeproof(#$ISSUE): seal provenance bundle"
+  ```
+  Then re-run the Step 2 check above; it must succeed (exit 0) before you
+  push.
+- If the file does not exist at all, tell the user to run
+  `/forgeproof:run $ISSUE` first.
 
 ## Step 3 — Push branch
 
@@ -81,6 +97,7 @@ Closes #$ISSUE
 *This PR was generated with [ForgeProof](https://github.com/ryanjmichie-git/forgeproof-plugin). The `.rpack`
 bundle in `.forgeproof/` is a cryptographically signed provenance record.
 Run `/forgeproof:verify .forgeproof/issue-$ISSUE.rpack` to verify integrity.*
+*The bundle can be verified automatically on PRs with the [forgeproof-verify GitHub Action](https://github.com/ryanjmichie-git/forgeproof-verify).*
 ```
 
 ## Step 5 — Create PR

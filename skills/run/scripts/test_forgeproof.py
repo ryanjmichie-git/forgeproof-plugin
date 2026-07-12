@@ -1579,11 +1579,18 @@ class TestSkillContract:
                     if e.code not in (0, None):
                         failures.append(f"{skill_md.parent.name}: {line}")
         capsys.readouterr()  # swallow argparse usage noise
-        assert checked >= 5, (
+        assert checked >= 13, (
             f"only {checked} engine invocations found across SKILL.md files — "
             "the extractor is broken or the skills no longer document the engine"
         )
         assert failures == [], "\n".join(failures)
+
+    def test_push_guard_bundle_filename_matches_engine(self):
+        """push Step 2 gates on the literal bundle filename; if the engine
+        renames its .rpack output, the guard silently never fires."""
+        push_md = (SKILLS_DIR / "push" / "SKILL.md").read_text(encoding="utf-8")
+        assert "issue-$ISSUE.rpack" in push_md
+        assert "issue-{issue}.rpack" in FORGEPROOF_PY.read_text(encoding="utf-8")
 
     def test_skill_documented_engine_path_resolves(self):
         """Each SKILL.md states the engine path in prose; a stale path there
