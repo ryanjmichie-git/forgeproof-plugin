@@ -56,9 +56,11 @@ fixtures in CI (v1.0.1 and v1.1.0).
 
 ### Changed
 
-- `verify` JSON output gains additive keys only (`complete`, `checks`,
-  `bundle`, `anchor`, `strict`); the legacy seven keys and all exit codes are
-  unchanged — byte-compatible for existing consumers.
+- `verify` JSON output gains new keys (`complete`, `checks`, `bundle`,
+  `anchor`, `strict`). The legacy seven keys are byte-identical and all exit
+  codes are unchanged; the new keys are purely additive, so consumers reading
+  specific keys are unaffected, but whole-output comparisons will see the
+  new keys.
 - The push skill's PR template now mentions that bundles are verified
   automatically on PRs via the forgeproof-verify Action.
 

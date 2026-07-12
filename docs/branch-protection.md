@@ -47,7 +47,7 @@ jobs:
     if: startsWith(github.head_ref, 'forgeproof/')
     steps:
       - uses: actions/checkout@v4
-      - uses: ryanjmichie-git/forgeproof-verify@024cfc360c47cde81fa8871e663b9d62b0da44e8 # v1.0.0
+      - uses: ryanjmichie-git/forgeproof-verify@633444e1d77925dfb544c5f146c3289e4ebfd598 # v1.0.0
 ```
 
 Pin the Action by **full commit SHA** (as above) — that is the only reference
@@ -93,6 +93,14 @@ rule quirk gives you selective enforcement:
 
 Result: human PRs merge freely, while any branch claiming ForgeProof
 provenance must actually verify. The branch namespace is the opt-in.
+`/forgeproof:push` creates branches named `forgeproof/<issue>`, so the filter
+matches plugin-created PRs with no extra configuration (don't rename those
+branches).
+
+The corollary: a `.rpack` on a branch **outside** `forgeproof/*` is never
+checked under this configuration, so reviewers should not assume a bundle in
+the diff was verified just because the checks are green. The advisory
+alternative below covers repos that want every PR checked.
 
 **Advisory alternative:** drop the `if:` filter and set
 `require-bundle: "false"`. The check then runs on every PR, verifies a bundle
@@ -115,7 +123,8 @@ trialing the Action before enforcing it.
 
 ## Strict vs lenient
 
-Verification answers two different questions (see issue #9):
+Verification answers two different questions (see
+[forgeproof-plugin#9](https://github.com/ryanjmichie-git/forgeproof-plugin/issues/9)):
 
 - **Integrity of what is present** — was anything that *can* be checked
   tampered with?
