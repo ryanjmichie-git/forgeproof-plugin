@@ -1218,10 +1218,21 @@ def cmd_verify(args: argparse.Namespace) -> None:
         else:
             check("signature", "fail", "signature not canonical SSHSIG")
     elif not stored_signature:
-        warnings.append("No signature present in bundle")
-        check("signature", "warn", "No signature present in bundle")
+        # A missing/blank signature is not "cannot verify yet" — the signature
+        # lives inside the .rpack and always travels with it (finalize signs
+        # before it ever writes the bundle), so its absence means the bundle is
+        # unsigned or was stripped. Either way provenance cannot be established,
+        # so this is a hard failure in every mode, not a warning. Without this,
+        # an attacker can rewrite content, re-record hashes, drop the signature,
+        # and recompute the (keyless, public) root_digest to forge verified:true.
+        errors.append("No signature present in bundle — provenance cannot be verified")
+        check("signature", "fail", "no signature present in bundle")
     else:
-        check("signature", "skipped", "no public key in bundle to verify against")
+        # Signature present but no public_key to check it against — the same
+        # forgery hole from the other side. public_key is inside the signed
+        # digest, so a real bundle always carries it; its absence is a hard fail.
+        errors.append("No public key present in bundle — signature cannot be verified")
+        check("signature", "fail", "no public key present in bundle to verify signature")
 
     # 4. Verify chain hash. The chain file resolves against the anchor first
     # (bundle-relative layouts verify from any cwd), falling back to the
@@ -1713,11 +1724,30 @@ def cmd_gate_pr(_args: argparse.Namespace) -> None:
     if tool not in ("Bash", "PowerShell") or "gh pr create" not in cmd:
         sys.exit(0)
 
-    if list(CHAIN_DIR.glob("*.rpack")):
-        sys.exit(0)
+    # A structurally valid signed bundle is required — not just any file named
+    # *.rpack (a garbage file used to satisfy an existence check would sail
+    # through). This is a lightweight shape check only: parse as JSON and
+    # confirm the signing fields are present and non-empty. It deliberately
+    # does NOT run the cryptographic verify (no ssh-keygen, no SHA-256 over
+    # artifacts) — the gate runs synchronously under a 10s hook budget on every
+    # 'gh pr create', and full verification is CI's job. A parse failure on one
+    # candidate is swallowed (that file simply isn't a valid bundle); the gate
+    # allows iff at least one candidate is structurally valid.
+    for candidate in CHAIN_DIR.glob("*.rpack"):
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("format") != RPACK_FORMAT:
+            continue
+        if all(isinstance(data.get(k), str) and data.get(k)
+               for k in ("signature", "public_key", "root_digest")):
+            sys.exit(0)
 
     reason = (
-        "No .rpack bundle found in .forgeproof/. "
+        "No structurally valid signed .rpack bundle found in .forgeproof/. "
         "Run /forgeproof:run first to generate a provenance bundle, "
         "then use /forgeproof:push to create the PR."
     )

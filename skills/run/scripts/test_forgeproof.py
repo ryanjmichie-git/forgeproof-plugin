@@ -35,6 +35,70 @@ spec.loader.exec_module(fp)
 
 
 # ---------------------------------------------------------------------------
+# Signing helpers for tests
+#
+# v1.2.1 makes verify REQUIRE a present, canonical, valid signature (and a
+# present public_key), so any bundle that must verify GREEN has to be really
+# signed — the "fake-signature" mock cannot satisfy signature_is_canonical +
+# verify_signature. One ephemeral ssh-keygen keypair is generated on first use
+# and shared across the suite; tests that build signed bundles gate on
+# ssh-keygen the same way the frozen-fixture compat tests do.
+# ---------------------------------------------------------------------------
+
+import shutil  # noqa: E402  (also imported later; needed by the helpers below)
+
+
+def _skip_without_sshkeygen() -> None:
+    """Skip locally when ssh-keygen is absent; fail loudly in CI (where it is
+    always installed). Mirrors TestV101Compat._require_sshkeygen."""
+    if not shutil.which("ssh-keygen"):
+        if os.environ.get("CI"):
+            pytest.fail("ssh-keygen missing in CI — signing test must not be skipped")
+        pytest.skip("ssh-keygen not available")
+
+
+_TEST_SIGNING_KEY: "tuple[Path, str] | None" = None
+
+
+def _test_signing_key() -> "tuple[Path, str]":
+    """(private_key_path, public_key_text) for one shared ephemeral Ed25519
+    keypair, generated once via ssh-keygen. Call _skip_without_sshkeygen first."""
+    global _TEST_SIGNING_KEY
+    if _TEST_SIGNING_KEY is None:
+        priv, pub = fp.generate_ephemeral_keypair("testsign")
+        _TEST_SIGNING_KEY = (priv, pub.read_text().strip())
+    return _TEST_SIGNING_KEY
+
+
+def _sign_bundle(bundle: dict) -> dict:
+    """Sign a bundle in place exactly as cmd_finalize does: set public_key, then
+    compute root_digest over everything except root_digest/signature, then sign
+    that digest. Returns the same dict so callers can chain. Requires ssh-keygen
+    (gate with _skip_without_sshkeygen before calling)."""
+    priv, pub_text = _test_signing_key()
+    bundle.pop("root_digest", None)
+    bundle.pop("signature", None)
+    bundle["public_key"] = pub_text
+    bundle["root_digest"] = fp.sha256_hex(fp.canonical_json(bundle))
+    bundle["signature"] = fp.sign_ed25519(bundle["root_digest"], priv)
+    return bundle
+
+
+def _shape_valid_bundle_json() -> str:
+    """A structurally valid (shape-only) bundle for gate tests. The PR gate
+    checks format + non-empty signature/public_key/root_digest strings, NOT the
+    cryptography (it runs under a 10s hook budget), so a placeholder signature
+    is sufficient and realistic for exercising the gate's allow path."""
+    return json.dumps({
+        "format": fp.RPACK_FORMAT,
+        "version": fp.RPACK_VERSION,
+        "signature": "-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----",
+        "public_key": "ssh-ed25519 AAAA test",
+        "root_digest": "0" * 64,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
@@ -583,7 +647,10 @@ class TestCmdRecordFlags:
 
 class TestCmdVerify:
     def _build_minimal_bundle(self, tmp_chain_dir, issue="1"):
-        """Build a minimal valid bundle for testing verification."""
+        """Build a minimal validly-signed bundle for testing verification.
+        v1.2.1 requires a real signature to verify, so this signs for real and
+        the callers gate on ssh-keygen via the skip below."""
+        _skip_without_sshkeygen()
         genesis = fp.build_block(
             index=0, action="genesis",
             data={"issue": 1, "title": "Test", "requirements": ["REQ-1: X"]},
@@ -608,11 +675,8 @@ class TestCmdVerify:
                 "failed_tests": [],
             },
             "chain_hash": fp.sha256_hex(fp.chain_path(issue).read_text()),
-            "public_key": "",
         }
-        root_digest = fp.sha256_hex(fp.canonical_json(bundle))
-        bundle["root_digest"] = root_digest
-        bundle["signature"] = ""
+        _sign_bundle(bundle)
 
         rpack_path = tmp_chain_dir / f"issue-{issue}.rpack"
         rpack_path.write_text(json.dumps(bundle, indent=2))
@@ -807,7 +871,29 @@ class TestCmdGatePr:
         return 0 if code is None else code
 
     def test_allows_when_bundle_exists(self, tmp_chain_dir):
-        (tmp_chain_dir / "issue-1.rpack").write_text("{}")
+        (tmp_chain_dir / "issue-1.rpack").write_text(_shape_valid_bundle_json())
+        event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
+        assert self._run_gate(event) == 0
+
+    def test_blocks_when_bundle_is_garbage(self, tmp_chain_dir, capsys):
+        """A file merely named *.rpack must not satisfy the gate — pre-v1.2.1 it
+        did (existence-only glob), letting a garbage file bypass the gate."""
+        (tmp_chain_dir / "issue-1.rpack").write_text("not a signed bundle")
+        event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
+        assert self._run_gate(event) == 2
+        assert "BLOCK" in capsys.readouterr().err
+
+    def test_blocks_when_bundle_missing_signature(self, tmp_chain_dir):
+        """Valid JSON with the wrong shape (no signing fields) is not a bundle."""
+        (tmp_chain_dir / "issue-1.rpack").write_text(json.dumps({
+            "format": fp.RPACK_FORMAT, "root_digest": "0" * 64, "public_key": "x"}))
+        event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
+        assert self._run_gate(event) == 2
+
+    def test_allows_when_one_of_several_is_valid(self, tmp_chain_dir):
+        """A garbage candidate alongside a valid one still allows."""
+        (tmp_chain_dir / "garbage.rpack").write_text("{}")
+        (tmp_chain_dir / "issue-1.rpack").write_text(_shape_valid_bundle_json())
         event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
         assert self._run_gate(event) == 0
 
@@ -837,7 +923,7 @@ class TestCmdGatePr:
             "hookSpecificOutput"]["permissionDecision"] == "deny"
 
     def test_allows_powershell_with_bundle(self, tmp_chain_dir):
-        (tmp_chain_dir / "issue-1.rpack").write_text("{}")
+        (tmp_chain_dir / "issue-1.rpack").write_text(_shape_valid_bundle_json())
         event = {"tool_name": "PowerShell",
                  "tool_input": {"command": "gh pr create --fill"}}
         assert self._run_gate(event) == 0
@@ -1459,7 +1545,8 @@ class TestHooksConfig:
         event = json.dumps(
             {"tool_name": "Bash", "tool_input": {"command": "gh pr create --title x"}})
         (tmp_path / ".forgeproof").mkdir()
-        (tmp_path / ".forgeproof" / "issue-1.rpack").write_text("{}")
+        (tmp_path / ".forgeproof" / "issue-1.rpack").write_text(
+            _shape_valid_bundle_json())
 
         available = self._real_interpreters(entry["hooks"])
         assert available
@@ -1943,11 +2030,14 @@ class TestV110Compat:
 
 
 def _deploy_v12_project(proj: Path, issue: str = "1") -> Path:
-    """Deploy a minimal unsigned-but-consistent bundle the way a real checkout
-    looks: chain + bundle under proj/.forgeproof/, one artifact at its
-    recorded relative path. Mirrors TestCmdVerify._build_minimal_bundle
-    (copied, not shared — that class is frozen) but writes a real .forgeproof
-    layout so anchoring and strictness can be exercised."""
+    """Deploy a minimal validly-signed bundle the way a real checkout looks:
+    chain + bundle under proj/.forgeproof/, one artifact at its recorded
+    relative path. Mirrors TestCmdVerify._build_minimal_bundle (copied, not
+    shared — that class is frozen) but writes a real .forgeproof layout so
+    anchoring and strictness can be exercised. Signs for real (v1.2.1 requires
+    a valid signature to verify), so callers gate on ssh-keygen via the skip
+    below."""
+    _skip_without_sshkeygen()
     fdir = proj / ".forgeproof"
     fdir.mkdir(parents=True, exist_ok=True)
     src = proj / "src"
@@ -1996,10 +2086,8 @@ def _deploy_v12_project(proj: Path, issue: str = "1") -> Path:
             "failed_tests": [],
         },
         "chain_hash": fp.sha256_hex(chain_file.read_text(encoding="utf-8")),
-        "public_key": "",
     }
-    bundle["root_digest"] = fp.sha256_hex(fp.canonical_json(bundle))
-    bundle["signature"] = ""
+    _sign_bundle(bundle)
     rpack = fdir / f"issue-{issue}.rpack"
     rpack.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
     return rpack
@@ -2013,6 +2101,132 @@ def _run_verify(argv: list[str], capsys) -> tuple[int, str]:
         fp.cmd_verify(args)
     code = exc_info.value.code
     return (0 if code is None else code), capsys.readouterr().out
+
+
+class TestVerifyRequiresSignature:
+    """v1.2.1 security fix: a bundle without a present, canonical, valid
+    signature (and a present public_key) must NOT verify. Before this, a
+    missing/blank signature was only a warning, so an attacker could rewrite
+    an artifact, re-record its hash, strip the signature, and recompute the
+    (public, keyless) root_digest to get verified:true — a complete forgery.
+
+    These are RED-path tests and deliberately need no ssh-keygen: the whole
+    point is that an unsigned-but-digest-consistent bundle is rejected. A
+    non-empty placeholder public_key string is used only to steer which branch
+    is exercised; it is never cryptographically checked when no signature is
+    present. Tamper payloads are inert marker strings — verify only hashes
+    artifact bytes, never executes them."""
+
+    DUMMY_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTPLACEHOLDER test"
+
+    def _consistent_bundle(self, tmp_chain_dir, *, artifact=None):
+        """Build a bundle whose root_digest is internally consistent (the exact
+        thing an attacker can forge with no key), leaving signature/public_key
+        for the caller to set. Returns (rpack_path, bundle-dict) NOT yet written
+        with sig/pubkey — caller finalizes and writes."""
+        issue = "1"
+        genesis = fp.build_block(
+            index=0, action="genesis",
+            data={"issue": 1, "title": "Test", "requirements": ["REQ-1: X"]},
+            prev_hash=fp.GENESIS_PREV_HASH, key_path=None,
+        )
+        fp.save_chain(issue, [genesis])
+        artifacts = []
+        if artifact is not None:
+            path, content = artifact
+            fpath = tmp_chain_dir / path
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            fpath.write_text(content, encoding="utf-8")
+            artifacts = [{"path": path, "operation": "create",
+                          "sha256": fp.sha256_file(fpath)}]
+        bundle = {
+            "version": fp.RPACK_VERSION,
+            "format": fp.RPACK_FORMAT,
+            "issue": {"number": 1, "title": "Test", "url": ""},
+            "requirements": [{"id": "REQ-1", "text": "X", "status": "covered",
+                              "tests": ["t1"]}],
+            "artifacts": artifacts,
+            "decisions": [],
+            "evaluation": {"status": "pass", "tests_passed": 1, "tests_failed": 0,
+                           "lint_errors": 0, "requirement_coverage": "100%",
+                           "uncovered_requirements": [], "failed_tests": []},
+            "chain_hash": fp.sha256_hex(fp.chain_path(issue).read_text()),
+        }
+        return tmp_chain_dir / f"issue-{issue}.rpack", bundle
+
+    def _seal_and_write(self, rpack_path, bundle):
+        """Recompute root_digest over the bundle as it stands (public_key must
+        already be set if present), exactly as the verifier will recompute it,
+        then write. This is the attacker's keyless reseal."""
+        digest_view = {k: v for k, v in bundle.items()
+                       if k not in ("root_digest", "signature")}
+        bundle["root_digest"] = fp.sha256_hex(fp.canonical_json(digest_view))
+        rpack_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+
+    def test_missing_signature_key_is_red(self, tmp_chain_dir, capsys):
+        rpack_path, bundle = self._consistent_bundle(tmp_chain_dir)
+        bundle["public_key"] = self.DUMMY_PUBKEY  # present, but no signature
+        self._seal_and_write(rpack_path, bundle)  # no "signature" key at all
+        code, out = _run_verify(["--rpack", str(rpack_path)], capsys)
+        output = json.loads(out)
+        assert code == 1
+        assert output["verified"] is False
+        assert any("signature" in e.lower() for e in output["errors"])
+
+    def test_blank_signature_is_red(self, tmp_chain_dir, capsys):
+        rpack_path, bundle = self._consistent_bundle(tmp_chain_dir)
+        bundle["public_key"] = self.DUMMY_PUBKEY
+        self._seal_and_write(rpack_path, bundle)
+        bundle["signature"] = ""
+        rpack_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        code, out = _run_verify(["--rpack", str(rpack_path)], capsys)
+        output = json.loads(out)
+        assert code == 1
+        assert output["verified"] is False
+        assert any("signature" in e.lower() for e in output["errors"])
+
+    def test_blank_public_key_is_red(self, tmp_chain_dir, capsys):
+        # public_key stripped and resealed, a stale signature left in place so
+        # the pubkey branch (not the missing-signature branch) is exercised.
+        rpack_path, bundle = self._consistent_bundle(tmp_chain_dir)
+        bundle["public_key"] = ""
+        self._seal_and_write(rpack_path, bundle)
+        bundle["signature"] = "-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----"
+        rpack_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        code, out = _run_verify(["--rpack", str(rpack_path)], capsys)
+        output = json.loads(out)
+        assert code == 1
+        assert output["verified"] is False
+        assert any("public key" in e.lower() or "public_key" in e.lower()
+                   for e in output["errors"])
+
+    def test_full_forge_is_red_even_lenient(self, tmp_chain_dir, capsys):
+        # The exact attack: attacker-controlled artifact content, its hash
+        # re-recorded so the artifact check passes, no signature, digest
+        # resealed. Even in LENIENT mode (no --strict) this must be red — the
+        # signature is the gate, unconditionally. Inert marker payload; verify
+        # only SHA-256s the bytes, never runs them.
+        rpack_path, bundle = self._consistent_bundle(
+            tmp_chain_dir, artifact=("src/evil.py", "INJECTED_TAMPER_MARKER = 1\n"))
+        bundle["public_key"] = self.DUMMY_PUBKEY
+        self._seal_and_write(rpack_path, bundle)  # consistent digest, no signature
+        code, out = _run_verify(["--rpack", str(rpack_path)], capsys)
+        output = json.loads(out)
+        assert code == 1
+        assert output["verified"] is False
+        assert output["artifacts_checked"] == 1  # the forged artifact hashes clean...
+        assert output["artifacts_tampered"] == 0  # ...digest is consistent; sig is the gate
+        assert any("signature" in e.lower() for e in output["errors"])
+
+    def test_forge_renders_verification_failed_not_tamper(self, tmp_chain_dir, capsys):
+        rpack_path, bundle = self._consistent_bundle(tmp_chain_dir)
+        bundle["public_key"] = self.DUMMY_PUBKEY
+        self._seal_and_write(rpack_path, bundle)
+        code, out = _run_verify(
+            ["--rpack", str(rpack_path), "--format", "markdown"], capsys)
+        assert code == 1
+        assert "VERIFICATION FAILED" in out
+        assert "TAMPER" not in out
 
 
 class TestVerifyAnchoring:
@@ -2162,7 +2376,10 @@ class TestVerifyContract:
                    "artifacts_tampered"]
 
     def _build_minimal_bundle(self, tmp_chain_dir, issue="1"):
-        """Copied from TestCmdVerify._build_minimal_bundle (frozen class)."""
+        """Copied from TestCmdVerify._build_minimal_bundle (frozen class), now
+        validly signed (v1.2.1 requires a signature to verify). Gates on
+        ssh-keygen via the skip below."""
+        _skip_without_sshkeygen()
         genesis = fp.build_block(
             index=0, action="genesis",
             data={"issue": 1, "title": "Test", "requirements": ["REQ-1: X"]},
@@ -2187,11 +2404,8 @@ class TestVerifyContract:
                 "failed_tests": [],
             },
             "chain_hash": fp.sha256_hex(fp.chain_path(issue).read_text()),
-            "public_key": "",
         }
-        root_digest = fp.sha256_hex(fp.canonical_json(bundle))
-        bundle["root_digest"] = root_digest
-        bundle["signature"] = ""
+        _sign_bundle(bundle)
 
         rpack_path = tmp_chain_dir / f"issue-{issue}.rpack"
         rpack_path.write_text(json.dumps(bundle, indent=2))
@@ -2205,7 +2419,7 @@ class TestVerifyContract:
         assert output["verified"] is True
         assert output["evaluation_status"] == "pass"
         assert output["errors"] == []
-        assert output["warnings"] == ["No signature present in bundle"]
+        assert output["warnings"] == []  # v1.2.1: a valid signature emits no warning
         assert output["artifacts_checked"] == 0
         assert output["artifacts_missing"] == 0
         assert output["artifacts_tampered"] == 0
@@ -2221,9 +2435,11 @@ class TestVerifyContract:
         assert code == 1
         assert output["verified"] is False
         assert output["evaluation_status"] == "pass"  # sealed claim, key intact
+        # root_digest mismatch fires; the signature (over the unchanged stored
+        # digest) still validates, so it stays the single error.
         assert len(output["errors"]) == 1
         assert output["errors"][0].startswith("Root digest mismatch: computed ")
-        assert output["warnings"] == ["No signature present in bundle"]
+        assert output["warnings"] == []
         assert output["artifacts_checked"] == 0
         assert output["artifacts_missing"] == 0
         assert output["artifacts_tampered"] == 0
@@ -2245,7 +2461,7 @@ class TestVerifyContract:
         statuses = {c["name"]: c["status"] for c in output["checks"]}
         assert statuses["format"] == "ok"
         assert statuses["root_digest"] == "ok"
-        assert statuses["signature"] == "warn"  # unsigned minimal bundle
+        assert statuses["signature"] == "ok"  # v1.2.1: minimal bundle is now signed
         assert statuses["chain_hash"] == "ok"
         assert statuses["chain_linkage"] == "ok"
         assert statuses["artifacts"] == "ok"
@@ -2357,12 +2573,12 @@ class TestVerifyMarkdown:
 
     @staticmethod
     def _reseal(rpack, bundle):
-        """Recompute root_digest over a mutated (unsigned) bundle so only
-        the mutation under test is visible to the verifier."""
-        bundle.pop("root_digest", None)
-        bundle.pop("signature", None)
-        bundle["root_digest"] = fp.sha256_hex(fp.canonical_json(bundle))
-        bundle["signature"] = ""
+        """Re-sign a mutated bundle so only the mutation under test is visible
+        to the verifier. v1.2.1 requires a valid signature, so this signs for
+        real with the shared test key rather than blanking the signature.
+        Callers reach here via _deploy (→ _skip_without_sshkeygen), so
+        ssh-keygen is available."""
+        _sign_bundle(bundle)
         rpack.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
 
     def test_bundle_controlled_markdown_is_neutralized(

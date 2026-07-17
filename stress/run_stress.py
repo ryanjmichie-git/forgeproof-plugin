@@ -494,14 +494,35 @@ def scenario_hooks(rec: Recorder, interp_name: str, exe: str, proj: Path) -> Non
         expect(p.returncode == 0, "non-shell tool must be allowed")
     c("gate: non-shell tool allowed", fn_allow_edit_tool)
 
+    # A structurally valid (shape-only) bundle: the gate checks format +
+    # non-empty signature/public_key/root_digest, not the cryptography.
+    shape_valid_bundle = json.dumps({
+        "format": "forgeproof-rpack",
+        "version": "1.0.0",
+        "signature": "-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----",
+        "public_key": "ssh-ed25519 AAAA test",
+        "root_digest": "0" * 64,
+    })
+
     def fn_allow_with_bundle():
         bundled = proj / "gate-bundled"
         (bundled / ".forgeproof").mkdir(parents=True, exist_ok=True)
-        (bundled / ".forgeproof" / "issue-1.rpack").write_text("{}", encoding="utf-8")
+        (bundled / ".forgeproof" / "issue-1.rpack").write_text(
+            shape_valid_bundle, encoding="utf-8")
         p = gate(bundled, "Bash", "gh pr create --fill")
         expect(p.returncode == 0 and not p.stdout.strip(),
-               f"bundle present but rc={p.returncode}")
-    c("gate: allows with bundle present", fn_allow_with_bundle)
+               f"valid bundle present but rc={p.returncode}")
+    c("gate: allows with valid signed bundle present", fn_allow_with_bundle)
+
+    def fn_block_garbage_bundle():
+        # v1.2.1: a file merely named *.rpack no longer satisfies the gate.
+        garbage_dir = proj / "gate-garbage"
+        (garbage_dir / ".forgeproof").mkdir(parents=True, exist_ok=True)
+        (garbage_dir / ".forgeproof" / "issue-1.rpack").write_text(
+            "not a signed bundle", encoding="utf-8")
+        p = gate(garbage_dir, "Bash", "gh pr create --fill")
+        expect(p.returncode == 2, f"garbage .rpack must block, got rc={p.returncode}")
+    c("gate: blocks garbage .rpack (existence != validity)", fn_block_garbage_bundle)
 
     def fn_garbage_stdin():
         p = engine(exe, ["gate-pr"], block_dir, stdin_text="}}not json{{")
