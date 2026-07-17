@@ -1,8 +1,7 @@
 # ForgeProof
 
 [![CI](https://github.com/ryanjmichie-git/forgeproof-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanjmichie-git/forgeproof-plugin/actions/workflows/ci.yml)
-[![GitHub Action: forgeproof-verify](https://img.shields.io/badge/GitHub%20Action-forgeproof--verify-2088FF?logo=githubactions&logoColor=white)](https://github.com/ryanjmichie-git/forgeproof-verify)
-<!-- Phase 5: switch link to the Marketplace listing after publish -->
+[![GitHub Action: forgeproof-verify](https://img.shields.io/badge/GitHub%20Action-forgeproof--verify-2088FF?logo=githubactions&logoColor=white)](https://github.com/marketplace/actions/forgeproof-verify)
 
 Turn GitHub issues into working code with cryptographically signed provenance bundles.
 
