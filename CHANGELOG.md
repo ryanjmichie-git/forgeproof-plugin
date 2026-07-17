@@ -2,6 +2,41 @@
 
 All notable changes to ForgeProof are documented in this file.
 
+## [1.2.1] - 2026-07-17
+
+Security patch. `verify` now requires a signature — closing a forgery hole in
+which an unsigned bundle verified green. No legitimate bundle is affected:
+every `.rpack` finalize produces is signed, and both frozen compat fixtures
+(v1.0.1, v1.1.0) still verify, enforced in CI.
+
+### Security
+
+- **`verify` rejects an unsigned bundle.** A missing or blank `signature` (or a
+  missing/blank `public_key`) was previously only a warning, so verification
+  still passed. Because the signature is excluded from the `root_digest` (it is
+  what gets signed), an attacker could rewrite a recorded artifact, re-record
+  its hash, strip the signature, and recompute the keyless, public `root_digest`
+  to forge `verified: true` — and the GitHub Action, which verifies with
+  `--strict` by default, would show that forged PR green. `verify` now treats an
+  absent signature or public key as a hard failure in every mode (not gated on
+  `--strict`); the signature lives inside the `.rpack` and always travels with
+  it, so its absence is never legitimate. The verdict reads `VERIFICATION
+  FAILED` (not `TAMPER DETECTED`): stripping cannot be distinguished from
+  never-signed, so the claim stays honest.
+- **The PR gate requires a structurally valid signed bundle.** `gate-pr`
+  previously allowed `gh pr create` when `.forgeproof/` held *any* file named
+  `*.rpack`, so a garbage file satisfied it. It now parses each candidate and
+  requires the `format`, `signature`, `public_key`, and `root_digest` fields to
+  be present and non-empty. This is a fast structural check only — no
+  cryptographic verification runs in the hook; that remains CI's job.
+
+### Tests
+
+- New `TestVerifyRequiresSignature`: deleted signature, blank signature, blank
+  public key, and a full content-forge all verify red; markdown renders
+  `VERIFICATION FAILED`. New `gate-pr` cases for garbage and wrong-shape
+  bundles. Test fixtures that build bundles for verification now sign for real.
+
 ## [1.2.0] - 2026-07-12
 
 "Verification by default": every PR that carries a ForgeProof bundle can now
