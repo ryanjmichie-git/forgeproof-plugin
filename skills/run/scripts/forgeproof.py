@@ -79,7 +79,10 @@ def read_json_file(path: Path, what: str) -> Any:
         die(f"cannot read {what} ({path}): {e}")
     try:
         return json.loads(text)
-    except (json.JSONDecodeError, ValueError) as e:
+    except (json.JSONDecodeError, ValueError, RecursionError) as e:
+        # RecursionError: deeply nested JSON overflows json's recursive scanner.
+        # Catch it here so a crafted file dies cleanly like any other bad input
+        # instead of leaking a traceback through every chain/bundle read.
         die(f"{what} is not valid JSON ({path}): {e}")
 
 
@@ -196,15 +199,17 @@ _SSHSIG_BODY_CHARS = set(
 
 def signature_is_canonical(sig: str) -> bool:
     """A bundle signature must be exactly the SSHSIG armor ssh-keygen emitted,
-    with no trailing bytes. `ssh-keygen -Y verify` ignores data after the END
-    marker, so without this check the signature field could be altered (junk
-    appended) while still verifying — a change that must instead turn verify
-    red. Content is always protected by the root digest regardless; this closes
-    the cosmetic malleability of the signature field itself."""
-    s = sig.strip()
-    if not (s.startswith(SSHSIG_BEGIN) and s.endswith(SSHSIG_END)):
+    with no leading or trailing bytes of ANY kind — including whitespace.
+    `ssh-keygen -Y verify` ignores data after the END marker, and a stored
+    signature is already stripped at signing time, so without this check the
+    signature field could be altered post-signing (junk OR whitespace appended)
+    while still verifying — a change that must instead turn verify red. Do NOT
+    strip() here: stripping re-admits the whitespace-trailer malleability this
+    guards against. Content is always protected by the root digest regardless;
+    this closes the cosmetic malleability of the signature field itself."""
+    if not (sig.startswith(SSHSIG_BEGIN) and sig.endswith(SSHSIG_END)):
         return False
-    body = s[len(SSHSIG_BEGIN):len(s) - len(SSHSIG_END)]
+    body = sig[len(SSHSIG_BEGIN):len(sig) - len(SSHSIG_END)]
     return all(c in _SSHSIG_BODY_CHARS for c in body)
 
 
@@ -1190,7 +1195,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
     computed_digest = sha256_hex(canonical_json(bundle_for_hash))
 
     if computed_digest != stored_digest:
-        errors.append(f"Root digest mismatch: computed {computed_digest[:16]}..., stored {stored_digest[:16]}...")
+        errors.append(f"Root digest mismatch: computed {computed_digest[:16]}..., stored {str(stored_digest)[:16]}...")
         check("root_digest", "fail",
               f"computed {computed_digest[:16]}..., stored {str(stored_digest)[:16]}...")
     else:
@@ -1206,7 +1211,12 @@ def cmd_verify(args: argparse.Namespace) -> None:
         if not canonical_ok:
             errors.append("Signature field has trailing or altered data "
                           "(not canonical SSHSIG)")
-        sig_ok = verify_signature(stored_digest, stored_signature, public_key)
+        # stored_digest must be a str to sign/verify. A non-string root_digest
+        # is already a mismatch error above; guard here so verify_signature is
+        # never handed a non-str (which crashed on write_text) — a malformed
+        # bundle fails cleanly instead of tracebacking.
+        sig_ok = (isinstance(stored_digest, str)
+                  and verify_signature(stored_digest, stored_signature, public_key))
         if not sig_ok:
             errors.append("Ed25519 signature verification FAILED")
         elif not errors:
@@ -1736,14 +1746,29 @@ def cmd_gate_pr(_args: argparse.Namespace) -> None:
     for candidate in CHAIN_DIR.glob("*.rpack"):
         try:
             data = json.loads(candidate.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except Exception:
+            # Any failure — unreadable, invalid JSON, or RecursionError on
+            # deeply nested input — means this candidate is not a usable bundle.
+            # Swallow it and keep looking; a crafted .rpack must never crash the
+            # gate into a non-2 exit that Claude Code reads as fail-open.
             continue
         if not isinstance(data, dict):
             continue
         if data.get("format") != RPACK_FORMAT:
             continue
-        if all(isinstance(data.get(k), str) and data.get(k)
-               for k in ("signature", "public_key", "root_digest")):
+        sig = data.get("signature")
+        pub = data.get("public_key")
+        digest = data.get("root_digest")
+        # Shape-check the signing fields — NOT the cryptography. The gate runs
+        # synchronously under a 10s hook budget, so full verification (ssh-keygen
+        # + artifact hashing) is CI's job; here we confirm the fields at least
+        # LOOK like a signed bundle: SSHSIG armor, an ssh-* public key, and a
+        # 64-char hex digest. This keeps "a signed bundle is present" honest
+        # rather than accepting any non-empty strings.
+        if (isinstance(sig, str) and signature_is_canonical(sig)
+                and isinstance(pub, str) and pub.startswith("ssh-")
+                and isinstance(digest, str) and len(digest) == 64
+                and all(c in "0123456789abcdef" for c in digest)):
             sys.exit(0)
 
     reason = (
