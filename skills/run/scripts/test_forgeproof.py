@@ -873,6 +873,27 @@ class TestCmdSummary:
         with pytest.raises(SystemExit):
             fp.cmd_summary(args)
 
+    @pytest.mark.parametrize("bad_digest", [7, None, ["x"], {"a": 1}])
+    def test_summary_non_string_root_digest_dies_cleanly(
+            self, tmp_chain_dir, bad_digest):
+        """A non-string root_digest used to traceback on the [:16] slice; it must
+        die cleanly through the required-field guard instead (v1.2.2)."""
+        bundle = {
+            "version": fp.RPACK_VERSION, "format": fp.RPACK_FORMAT,
+            "issue": {"number": 1, "title": "Test", "url": ""},
+            "requirements": [], "artifacts": [], "decisions": [],
+            "evaluation": {"status": "pass", "tests_passed": 1, "tests_failed": 0,
+                           "lint_errors": 0, "requirement_coverage": "100%",
+                           "uncovered_requirements": [], "failed_tests": []},
+            "root_digest": bad_digest, "public_key": "", "signature": "",
+            "chain_hash": "",
+        }
+        (tmp_chain_dir / "issue-1.rpack").write_text(json.dumps(bundle))
+        args = MagicMock()
+        args.issue = "1"
+        with pytest.raises(SystemExit):
+            fp.cmd_summary(args)
+
 
 class TestCmdGatePr:
     """PreToolUse hook gate for 'gh pr create'."""
@@ -947,6 +968,13 @@ class TestCmdGatePr:
             "public_key": "ssh-ed25519 AAAA", "root_digest": "nothex" + "0" * 58}))
         event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
         assert self._run_gate(event) == 2
+
+    def test_deeply_nested_event_exits_cleanly(self, tmp_chain_dir):
+        """A deeply nested hook EVENT on stdin (separate from the candidate-file
+        parse) made json raise RecursionError → exit 1 + traceback. An
+        unparseable event must exit cleanly — the gate's fail-safe is allow, not
+        crash (v1.2.2)."""
+        assert self._run_gate("[" * 2000 + "]" * 2000) == 0
 
     def test_blocks_when_no_bundle(self, tmp_chain_dir, capsys):
         event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
@@ -1102,6 +1130,11 @@ class TestCmdLintHook:
 
     def _event(self, path) -> str:
         return json.dumps({"tool_name": "Edit", "tool_input": {"file_path": str(path)}})
+
+    def test_deeply_nested_event_exits_cleanly(self, tmp_chain_dir):
+        """A deeply nested hook event must not traceback; lint-hook always
+        no-ops on an unparseable event (exit 0) (v1.2.2)."""
+        assert self._invoke("[" * 2000 + "]" * 2000) == 0
 
     def test_malformed_stdin_silent(self, tmp_chain_dir, capsys):
         assert self._invoke("not json {") == 0

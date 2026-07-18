@@ -1463,6 +1463,11 @@ def cmd_summary(args: argparse.Namespace) -> None:
         artifacts = bundle["artifacts"]
         status = evaluation["status"]
         _ = issue_info["number"]
+        root_digest = bundle["root_digest"]
+        # A non-string digest would traceback on the [:16] slice below; treat it
+        # like any other malformed required field and die cleanly.
+        if not isinstance(root_digest, str):
+            raise TypeError("root_digest must be a string")
     except (KeyError, TypeError):
         die(f"bundle is missing required fields (corrupt or not a ForgeProof "
             f"bundle): {rpack_path}")
@@ -1475,7 +1480,7 @@ def cmd_summary(args: argparse.Namespace) -> None:
         "",
         f"**Status:** {status_badge}",
         f"**Bundle:** `.forgeproof/issue-{issue}.rpack`",
-        f"**Root Digest:** `{bundle['root_digest'][:16]}...`",
+        f"**Root Digest:** `{root_digest[:16]}...`",
         "",
         "### Requirement Coverage",
         "",
@@ -1592,7 +1597,10 @@ def cmd_lint_hook(_args: argparse.Namespace) -> None:
     """
     try:
         event = json.loads(sys.stdin.read())
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        # RecursionError: a deeply nested event JSON overflows json's scanner.
+        # Any unparseable event means "nothing to act on" — exit cleanly (the
+        # gate's fail-safe is allow; lint-hook always no-ops), never traceback.
         sys.exit(0)
     if not isinstance(event, dict):
         sys.exit(0)  # well-formed JSON of the wrong shape must never crash
@@ -1717,7 +1725,10 @@ def cmd_gate_pr(_args: argparse.Namespace) -> None:
     """
     try:
         event = json.loads(sys.stdin.read())
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        # RecursionError: a deeply nested event JSON overflows json's scanner.
+        # Any unparseable event means "nothing to act on" — exit cleanly (the
+        # gate's fail-safe is allow; lint-hook always no-ops), never traceback.
         sys.exit(0)
     if not isinstance(event, dict):
         sys.exit(0)  # well-formed JSON of the wrong shape must never crash

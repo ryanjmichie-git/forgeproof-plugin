@@ -42,10 +42,15 @@ review. No legitimate bundle changes verdict; both frozen compat fixtures
   e.g. `"root_digest": 7` crashed on `stored_digest[:16]` (and, when a signature
   was present, on handing a non-string to `verify_signature`). Both paths now
   produce a clean red verdict, honoring the wrong-shape clean-error guarantee.
-- **`read_json_file` dies cleanly on deeply nested JSON.** The shared chain/bundle
-  reader caught only `(json.JSONDecodeError, ValueError)`; deep nesting raised an
-  uncaught `RecursionError`. It now catches that too, so every reader path
-  (verify, lint-hook, gate) fails with an actionable error instead of a traceback.
+- **`summary` no longer tracebacks on a non-string `root_digest`.** It sliced
+  `bundle['root_digest'][:16]` directly; a non-string digest now fails through
+  the command's existing required-field guard like any other malformed field.
+- **Deeply nested JSON dies cleanly at every entry point.** `read_json_file`
+  (the shared chain/bundle reader) and the *separate* stdin-event parses in
+  `gate-pr` and `lint-hook` all caught only `(json.JSONDecodeError, ValueError)`,
+  so deeply nested input raised an uncaught `RecursionError`. All three now
+  catch it — file reads die with an actionable error; the hooks exit cleanly
+  (the gate's fail-safe is allow, lint-hook no-ops) — instead of tracebacking.
 
 ## [1.2.1] - 2026-07-17
 
