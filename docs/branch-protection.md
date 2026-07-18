@@ -47,7 +47,7 @@ jobs:
     if: startsWith(github.head_ref, 'forgeproof/')
     steps:
       - uses: actions/checkout@v4
-      - uses: ryanjmichie-git/forgeproof-verify@633444e1d77925dfb544c5f146c3289e4ebfd598 # v1.0.0
+      - uses: ryanjmichie-git/forgeproof-verify@0bd8aaec4ede6a53be0ed3dbf130c22a0cbcfe8f # v1.0.2
 ```
 
 Pin the Action by **full commit SHA** (as above) — that is the only reference

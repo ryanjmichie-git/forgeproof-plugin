@@ -2,6 +2,55 @@
 
 All notable changes to ForgeProof are documented in this file.
 
+## [1.2.2] - 2026-07-17
+
+Hardening follow-up to v1.2.1's require-signature fix, from a second independent
+review. No legitimate bundle changes verdict; both frozen compat fixtures
+(v1.0.1, v1.1.0) still verify.
+
+### Security
+
+- **Whitespace signature malleability closed.** `signature_is_canonical` called
+  `sig.strip()` before checking the SSHSIG armor, so appending whitespace (a
+  newline, space, tab, or blank line) to a valid signature survived the check
+  and — because `ssh-keygen -Y verify` ignores trailing bytes — still verified
+  green. That violated the promise that *any* post-signing change to the
+  signature turns verify red. The canonical check no longer strips; a stored
+  signature is already stripped at signing time, so pristine bundles are
+  unaffected while any added whitespace now turns verification red.
+- **PR gate on the authoritative CI check re-pinned.** The dogfood workflow and
+  the consumer recipe (`README.md`, `docs/branch-protection.md`) pinned
+  `forgeproof-verify@v1.0.0`, whose vendored verifier predates the
+  require-signature fix and still passed unsigned bundles. All three now pin
+  **v1.0.2** (commit `0bd8aae`), which vendors this v1.2.2 engine — so the
+  authoritative PR check rejects unsigned *and* whitespace-tampered bundles.
+- **PR gate fails closed on crafted input.** `gate-pr` caught only
+  `(OSError, ValueError)` around its bundle parse, so a deeply nested `.rpack`
+  raised an uncaught `RecursionError` → exit 1 with no deny payload, which Claude
+  Code treats as non-blocking (a fail-open gate bypass). It now swallows any
+  parse failure and falls through to a clean block (exit 2).
+- **Gate shape check tightened.** The gate accepted any non-empty
+  `signature`/`public_key`/`root_digest` strings, so "a signed bundle is present"
+  overstated what it checked. It now requires SSHSIG armor, an `ssh-*` public
+  key, and a 64-char hex digest (still no cryptography — full verification
+  remains CI's job under the 10s hook budget).
+
+### Fixed
+
+- **`verify` no longer tracebacks on a non-string `root_digest`.** A bundle with
+  e.g. `"root_digest": 7` crashed on `stored_digest[:16]` (and, when a signature
+  was present, on handing a non-string to `verify_signature`). Both paths now
+  produce a clean red verdict, honoring the wrong-shape clean-error guarantee.
+- **`summary` no longer tracebacks on a non-string `root_digest`.** It sliced
+  `bundle['root_digest'][:16]` directly; a non-string digest now fails through
+  the command's existing required-field guard like any other malformed field.
+- **Deeply nested JSON dies cleanly at every entry point.** `read_json_file`
+  (the shared chain/bundle reader) and the *separate* stdin-event parses in
+  `gate-pr` and `lint-hook` all caught only `(json.JSONDecodeError, ValueError)`,
+  so deeply nested input raised an uncaught `RecursionError`. All three now
+  catch it — file reads die with an actionable error; the hooks exit cleanly
+  (the gate's fail-safe is allow, lint-hook no-ops) — instead of tracebacking.
+
 ## [1.2.1] - 2026-07-17
 
 Security patch. `verify` now requires a signature — closing a forgery hole in

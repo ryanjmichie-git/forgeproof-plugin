@@ -695,6 +695,23 @@ class TestCmdVerify:
         assert output["verified"] is True
         assert output["errors"] == []
 
+    def test_verify_rejects_whitespace_signature_trailer(self, tmp_chain_dir, capsys):
+        """End-to-end (v1.2.2): a whitespace-only trailer on an otherwise valid
+        signature must turn verify red. The signature is excluded from
+        root_digest, so only the canonical check catches this — ssh-keygen
+        itself ignores the trailing bytes and would still pass."""
+        rpack_path, bundle = self._build_minimal_bundle(tmp_chain_dir)
+        bundle["signature"] = bundle["signature"] + "\n"
+        rpack_path.write_text(json.dumps(bundle, indent=2))
+        args = MagicMock()
+        args.rpack = str(rpack_path)
+        with pytest.raises(SystemExit) as exc_info:
+            fp.cmd_verify(args)
+        assert exc_info.value.code == 1
+        output = json.loads(capsys.readouterr().out)
+        assert output["verified"] is False
+        assert any("canonical" in e.lower() for e in output["errors"])
+
     def test_verify_tampered_bundle_fails(self, tmp_chain_dir, capsys):
         rpack_path, bundle = self._build_minimal_bundle(tmp_chain_dir)
         # Tamper with the bundle
@@ -856,6 +873,27 @@ class TestCmdSummary:
         with pytest.raises(SystemExit):
             fp.cmd_summary(args)
 
+    @pytest.mark.parametrize("bad_digest", [7, None, ["x"], {"a": 1}])
+    def test_summary_non_string_root_digest_dies_cleanly(
+            self, tmp_chain_dir, bad_digest):
+        """A non-string root_digest used to traceback on the [:16] slice; it must
+        die cleanly through the required-field guard instead (v1.2.2)."""
+        bundle = {
+            "version": fp.RPACK_VERSION, "format": fp.RPACK_FORMAT,
+            "issue": {"number": 1, "title": "Test", "url": ""},
+            "requirements": [], "artifacts": [], "decisions": [],
+            "evaluation": {"status": "pass", "tests_passed": 1, "tests_failed": 0,
+                           "lint_errors": 0, "requirement_coverage": "100%",
+                           "uncovered_requirements": [], "failed_tests": []},
+            "root_digest": bad_digest, "public_key": "", "signature": "",
+            "chain_hash": "",
+        }
+        (tmp_chain_dir / "issue-1.rpack").write_text(json.dumps(bundle))
+        args = MagicMock()
+        args.issue = "1"
+        with pytest.raises(SystemExit):
+            fp.cmd_summary(args)
+
 
 class TestCmdGatePr:
     """PreToolUse hook gate for 'gh pr create'."""
@@ -896,6 +934,47 @@ class TestCmdGatePr:
         (tmp_chain_dir / "issue-1.rpack").write_text(_shape_valid_bundle_json())
         event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
         assert self._run_gate(event) == 0
+
+    def test_blocks_on_deeply_nested_bundle(self, tmp_chain_dir, capsys):
+        """A deeply nested .rpack makes json.loads raise RecursionError. The
+        gate must swallow it and fail CLOSED (exit 2), never crash to a
+        fail-open exit 1 that lets 'gh pr create' through (v1.2.2)."""
+        (tmp_chain_dir / "deep.rpack").write_text("[" * 2000 + "]" * 2000)
+        event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
+        assert self._run_gate(event) == 2
+        assert "BLOCK" in capsys.readouterr().err
+
+    def test_blocks_when_signature_not_sshsig(self, tmp_chain_dir):
+        """A non-empty but non-SSHSIG signature is not a signed bundle — the
+        gate shape-checks the signing fields, not just their presence (v1.2.2)."""
+        (tmp_chain_dir / "issue-1.rpack").write_text(json.dumps({
+            "format": fp.RPACK_FORMAT, "signature": "notasignature",
+            "public_key": "ssh-ed25519 AAAA", "root_digest": "0" * 64}))
+        event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
+        assert self._run_gate(event) == 2
+
+    def test_blocks_when_public_key_not_ssh(self, tmp_chain_dir):
+        (tmp_chain_dir / "issue-1.rpack").write_text(json.dumps({
+            "format": fp.RPACK_FORMAT,
+            "signature": "-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----",
+            "public_key": "notakey", "root_digest": "0" * 64}))
+        event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
+        assert self._run_gate(event) == 2
+
+    def test_blocks_when_root_digest_not_hex(self, tmp_chain_dir):
+        (tmp_chain_dir / "issue-1.rpack").write_text(json.dumps({
+            "format": fp.RPACK_FORMAT,
+            "signature": "-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----",
+            "public_key": "ssh-ed25519 AAAA", "root_digest": "nothex" + "0" * 58}))
+        event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
+        assert self._run_gate(event) == 2
+
+    def test_deeply_nested_event_exits_cleanly(self, tmp_chain_dir):
+        """A deeply nested hook EVENT on stdin (separate from the candidate-file
+        parse) made json raise RecursionError → exit 1 + traceback. An
+        unparseable event must exit cleanly — the gate's fail-safe is allow, not
+        crash (v1.2.2)."""
+        assert self._run_gate("[" * 2000 + "]" * 2000) == 0
 
     def test_blocks_when_no_bundle(self, tmp_chain_dir, capsys):
         event = {"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}}
@@ -1051,6 +1130,11 @@ class TestCmdLintHook:
 
     def _event(self, path) -> str:
         return json.dumps({"tool_name": "Edit", "tool_input": {"file_path": str(path)}})
+
+    def test_deeply_nested_event_exits_cleanly(self, tmp_chain_dir):
+        """A deeply nested hook event must not traceback; lint-hook always
+        no-ops on an unparseable event (exit 0) (v1.2.2)."""
+        assert self._invoke("[" * 2000 + "]" * 2000) == 0
 
     def test_malformed_stdin_silent(self, tmp_chain_dir, capsys):
         assert self._invoke("not json {") == 0
@@ -1358,6 +1442,74 @@ class TestMalformedInputRobustness:
         assert "corrupt" in r.stderr
 
 
+class TestMalformedBundleRobustness:
+    """Well-typed JSON of the wrong SHAPE (or pathological nesting) must yield a
+    clean verdict or a clean error, never a raw Python traceback — the project's
+    clean-error guarantee. Regressions fixed in v1.2.2."""
+
+    def test_non_string_root_digest_is_clean_red(self, tmp_chain_dir, capsys):
+        """root_digest as a non-string (e.g. 7) used to crash on
+        stored_digest[:16] ('int' object is not subscriptable). It must be a
+        clean red verdict instead."""
+        rpack = tmp_chain_dir / "issue-1.rpack"
+        rpack.write_text(json.dumps({
+            "format": fp.RPACK_FORMAT, "version": fp.RPACK_VERSION,
+            "issue": {"number": 1, "title": "x", "url": ""},
+            "requirements": [], "artifacts": [], "decisions": [],
+            "root_digest": 7, "signature": "", "public_key": "",
+        }), encoding="utf-8")
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        assert code == 1
+        data = json.loads(out)
+        assert data["verified"] is False
+        assert any("Root digest mismatch" in e for e in data["errors"])
+
+    def test_non_string_root_digest_with_signature_no_traceback(self, tmp_chain_dir, capsys):
+        """Second crash path: with a signature present, a non-string digest was
+        handed to verify_signature and crashed on write_text(7). The isinstance
+        guard short-circuits (so this needs no ssh-keygen) and fails cleanly."""
+        rpack = tmp_chain_dir / "issue-1.rpack"
+        rpack.write_text(json.dumps({
+            "format": fp.RPACK_FORMAT, "version": fp.RPACK_VERSION,
+            "issue": {"number": 1, "title": "x", "url": ""},
+            "requirements": [], "artifacts": [], "decisions": [],
+            "root_digest": 7,
+            "signature": "-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----",
+            "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 test",
+        }), encoding="utf-8")
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        assert code == 1
+        data = json.loads(out)
+        assert data["verified"] is False
+
+    def test_deeply_nested_bundle_verify_dies_cleanly(self, tmp_chain_dir):
+        """A deeply nested .rpack makes json raise RecursionError; verify must
+        convert it to a clean die(), not leak a traceback."""
+        rpack = tmp_chain_dir / "issue-1.rpack"
+        rpack.write_text("[" * 2000 + "]" * 2000, encoding="utf-8")
+        args = fp.build_parser().parse_args(["verify", "--rpack", str(rpack)])
+        with pytest.raises(SystemExit):
+            fp.cmd_verify(args)
+
+    def test_read_json_file_catches_recursion_error(self, tmp_path, monkeypatch):
+        """read_json_file is the shared reader for every chain/bundle load; if
+        json raises RecursionError on pathological input it must die cleanly, not
+        leak the traceback. Forced via monkeypatch rather than real deep nesting
+        because the depth at which json actually raises is platform/build-
+        dependent — 2000 levels trips CPython on Windows/macOS/Ubuntu but parses
+        fine on some builds (e.g. Debian's python3), so a real-nesting assertion
+        here is flaky. The other deep-JSON tests (verify/gate/lint-hook) stay
+        real-nesting: they have a shape fallback (a deep list isn't a dict), so
+        they exit cleanly on every build regardless."""
+        p = tmp_path / "x.json"
+        p.write_text("[]", encoding="utf-8")
+        def raise_recursion(*_a, **_k):
+            raise RecursionError("maximum recursion depth exceeded")
+        monkeypatch.setattr(fp.json, "loads", raise_recursion)
+        with pytest.raises(SystemExit):
+            fp.read_json_file(p, "bundle")
+
+
 class TestSignatureCanonical:
     """A bundle signature must be exactly the SSHSIG armor ssh-keygen emitted;
     ssh-keygen -Y verify ignores trailing bytes, so without a canonical check
@@ -1374,6 +1526,25 @@ class TestSignatureCanonical:
         lambda s: s.replace("SIGNATURE", "sig"), # broken markers
     ])
     def test_canonical_rejects_trailing_or_altered(self, mutate):
+        bundle = json.loads((FIXTURE_V101 / "issue-999.rpack").read_text(encoding="utf-8"))
+        assert not fp.signature_is_canonical(mutate(bundle["signature"]))
+
+    @pytest.mark.parametrize("mutate", [
+        lambda s: s + "\n",        # trailing newline
+        lambda s: s + " ",         # trailing space
+        lambda s: s + "\t",        # trailing tab
+        lambda s: s + "\n\n",      # trailing blank line
+        lambda s: s + "\r\n",      # trailing CRLF
+        lambda s: " " + s,         # leading space
+        lambda s: "\n" + s,        # leading newline
+    ])
+    def test_canonical_rejects_whitespace_trailers(self, mutate):
+        """Regression (v1.2.2): the canonical check used sig.strip(), so a
+        whitespace-only trailer survived it and a whitespace-appended signature
+        verified green — violating the promise that ANY post-signing change to
+        the signature turns verify red. ssh-keygen -Y verify also ignores
+        trailing bytes, so this canonical check is the only thing that catches
+        it."""
         bundle = json.loads((FIXTURE_V101 / "issue-999.rpack").read_text(encoding="utf-8"))
         assert not fp.signature_is_canonical(mutate(bundle["signature"]))
 
