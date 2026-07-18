@@ -1491,11 +1491,21 @@ class TestMalformedBundleRobustness:
         with pytest.raises(SystemExit):
             fp.cmd_verify(args)
 
-    def test_read_json_file_deep_nesting_dies_cleanly(self, tmp_path):
-        """read_json_file is the shared reader for every chain/bundle load; it
-        must catch RecursionError from deeply nested JSON and die cleanly."""
-        p = tmp_path / "deep.json"
-        p.write_text("[" * 2000 + "]" * 2000, encoding="utf-8")
+    def test_read_json_file_catches_recursion_error(self, tmp_path, monkeypatch):
+        """read_json_file is the shared reader for every chain/bundle load; if
+        json raises RecursionError on pathological input it must die cleanly, not
+        leak the traceback. Forced via monkeypatch rather than real deep nesting
+        because the depth at which json actually raises is platform/build-
+        dependent — 2000 levels trips CPython on Windows/macOS/Ubuntu but parses
+        fine on some builds (e.g. Debian's python3), so a real-nesting assertion
+        here is flaky. The other deep-JSON tests (verify/gate/lint-hook) stay
+        real-nesting: they have a shape fallback (a deep list isn't a dict), so
+        they exit cleanly on every build regardless."""
+        p = tmp_path / "x.json"
+        p.write_text("[]", encoding="utf-8")
+        def raise_recursion(*_a, **_k):
+            raise RecursionError("maximum recursion depth exceeded")
+        monkeypatch.setattr(fp.json, "loads", raise_recursion)
         with pytest.raises(SystemExit):
             fp.read_json_file(p, "bundle")
 
