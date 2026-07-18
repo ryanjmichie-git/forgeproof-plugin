@@ -22,9 +22,8 @@ review. No legitimate bundle changes verdict; both frozen compat fixtures
   the consumer recipe (`README.md`, `docs/branch-protection.md`) pinned
   `forgeproof-verify@v1.0.0`, whose vendored verifier predates the
   require-signature fix and still passed unsigned bundles. All three now pin
-  `v1.0.1` (commit `4610f35`). *Follow-up:* once the v1.2.2 engine is re-vendored
-  into `forgeproof-verify` as v1.0.2, re-pin these to v1.0.2 to also carry the
-  whitespace fix into CI.
+  **v1.0.2** (commit `0bd8aae`), which vendors this v1.2.2 engine — so the
+  authoritative PR check rejects unsigned *and* whitespace-tampered bundles.
 - **PR gate fails closed on crafted input.** `gate-pr` caught only
   `(OSError, ValueError)` around its bundle parse, so a deeply nested `.rpack`
   raised an uncaught `RecursionError` → exit 1 with no deny payload, which Claude

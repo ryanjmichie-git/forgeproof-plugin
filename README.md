@@ -102,7 +102,7 @@ jobs:
     if: startsWith(github.head_ref, 'forgeproof/')
     steps:
       - uses: actions/checkout@v4
-      - uses: ryanjmichie-git/forgeproof-verify@4610f35ce201740ef9441df67b3e1b3011ada9dc # v1.0.1
+      - uses: ryanjmichie-git/forgeproof-verify@0bd8aaec4ede6a53be0ed3dbf130c22a0cbcfe8f # v1.0.2
 ```
 
 With the head-branch filter, human PRs skip the check (skipped counts as satisfied) while `forgeproof/*` branches must verify. Full setup — rulesets, classic branch protection, fork-PR behavior, strict-vs-lenient guidance — in [docs/branch-protection.md](docs/branch-protection.md).
