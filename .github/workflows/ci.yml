@@ -90,7 +90,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+      # Installer v4.x is required for the cosign v3 line: v3.x cosign
+      # releases ship a .sigstore.json verification bundle instead of the
+      # detached .sig that installer v3.9.x still expects for custom
+      # versions (its download 404s -> exit 22 before cosign is installed).
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: ${{ matrix.cosign }}
       - name: Build one real attested bundle with the actual engine
