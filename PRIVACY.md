@@ -1,6 +1,6 @@
 # ForgeProof Privacy Policy
 
-**Last Updated:** 2026-07-03
+**Last Updated:** 2026-08-15
 
 ---
 
@@ -52,7 +52,7 @@ ForgeProof does not:
 
 There are no usage counters, no heartbeat pings, no crash reporters, no feature flags fetched from remote servers, no A/B testing, and no opt-in or opt-out telemetry settings — because there is no telemetry infrastructure to toggle.
 
-This is verifiable: the provenance engine (`skills/run/scripts/forgeproof.py`) imports only Python standard library modules (`hashlib`, `json`, `subprocess`, `argparse`, `tempfile`, `pathlib`, `shutil`, `os`, `sys`). No third-party packages. No network-capable imports.
+This is verifiable: the provenance engine (`skills/run/scripts/forgeproof.py`) imports only Python standard library modules (`argparse`, `base64`, `datetime`, `hashlib`, `json`, `os`, `pathlib`, `shutil`, `subprocess`, `sys`, `tempfile`, `typing`). No third-party packages. No network-capable imports.
 
 ---
 
@@ -63,9 +63,9 @@ This is verifiable: the provenance engine (`skills/run/scripts/forgeproof.py`) i
 Key lifecycle:
 
 1. **Generation** — When `/forgeproof:run` initializes a chain, `ssh-keygen` generates an Ed25519 keypair in the system temp directory (`/tmp` on Unix, `%TEMP%` on Windows) at `forgeproof_<issue>_ed25519`.
-2. **Usage** — The private key signs each block in the hash chain and the final root digest of the `.rpack` bundle.
+2. **Usage** — The private key signs each block in the hash chain and the final root digest of the `.rpack` bundle. From v1.3.0 the engine also parses the key's 32-byte seed locally (pure stdlib, in-process) to make the DSSE attestation signature with the same key — the seed never leaves the process and is never written anywhere.
 3. **Deletion** — Immediately after the bundle is finalized, the private key and its `.pub` companion are deleted from the temp directory. This is irreversible — the key cannot be recovered.
-4. **Public key persistence** — The public key is embedded in the `.rpack` bundle for self-contained verification. It cannot be used to forge signatures without the deleted private key.
+4. **Public key persistence** — The public key is embedded in the `.rpack` bundle (and, from v1.3.0, exported as `.forgeproof/issue-<N>.pub.pem`) for self-contained verification. It cannot be used to forge signatures without the deleted private key. **Note:** `ssh-keygen`'s default key comment embeds `username@hostname` of the generating machine, and ForgeProof stores the full public-key line — see "Personal information in the bundle" below.
 
 At no point are private keys:
 - Written to the project directory
@@ -88,6 +88,8 @@ At no point are private keys:
 ### Writes
 - `.forgeproof/chain-<issue>.json` — provenance hash chain
 - `.forgeproof/issue-<issue>.rpack` — signed provenance bundle
+- `.forgeproof/issue-<issue>.sigstore.json` — the attestation sidecar (v1.3.0+; same content as the copy embedded in the bundle)
+- `.forgeproof/issue-<issue>.pub.pem` — the public key as a PEM for cosign (v1.3.0+)
 - System temp directory — ephemeral Ed25519 keypairs (deleted after signing)
 - System temp directory — transient files for `ssh-keygen` sign/verify operations (deleted immediately)
 
@@ -146,16 +148,26 @@ An `.rpack` bundle contains:
 | Decisions | Context, choice, and rationale for design decisions | Medium (contains reasoning about code) |
 | Evaluation | Test pass/fail counts, lint error counts, requirement coverage | Low (aggregate metrics) |
 | Chain hash | SHA-256 of the provenance chain file | Low (integrity check) |
-| Public key | Ed25519 public key for signature verification | Low (public by definition) |
+| Public key | Full `ssh-ed25519` line, **including ssh-keygen's default comment, which embeds `username@hostname` of the generating machine** | Medium (machine/user identifier) |
 | Signature | Ed25519 signature over the root digest | Low (verification data) |
+| Attestation (v1.3.0+) | in-toto/SLSA statement: the same issue/requirements/artifact data, builder identity (model id self-reported, Claude Code version, plugin version), and approval events | Medium (see approver email below) |
+| Approver email (v1.3.0+) | `git config user.email` of the local user, recorded in each `approval` chain block and sealed into the attestation | Medium (personal identifier; empty string when git has no configured identity) |
 
 The bundle does **not** contain:
 - Source code content (only file paths and hashes)
 - User prompts or conversation history
 - API keys, tokens, or credentials
-- Personal information beyond what's in the GitHub issue
 
-The bundle is written to `.forgeproof/issue-<N>.rpack` in your project directory. It is only transmitted if you explicitly push it to GitHub via `/forgeproof:push`. You can delete it at any time with `/forgeproof:reset`.
+**Personal information the bundle DOES contain** (an earlier version of this
+policy wrongly claimed there was none beyond the GitHub issue): the
+`public_key` field's comment embeds the generating machine's
+`username@hostname` (an ssh-keygen default, present since v1.0.0), and from
+v1.3.0 each approval records the approver's git email. Both are visible to
+anyone who can read the bundle — which, once pushed, means anyone who can
+read the repository. Configure `git config user.email` accordingly if this
+matters to you.
+
+The bundle is written to `.forgeproof/issue-<N>.rpack` in your project directory (with the attestation sidecars beside it). It is only transmitted if you explicitly push it to GitHub via `/forgeproof:push`. You can delete it at any time with `/forgeproof:reset`.
 
 ---
 
@@ -175,5 +187,6 @@ The entire plugin is open source under the MIT license.
 
 | Date | Version | Change |
 |------|---------|--------|
+| 2026-08-15 | 1.3.0 | **Corrected a live inaccuracy:** the bundle has always carried `username@hostname` in the public-key comment; the "no personal information" claim was false and is now stated accurately. Added the v1.3.0 additions: approver git email in approval blocks/attestation, the two attestation sidecar files, local in-process seed parsing for DSSE signing, refreshed stdlib import list |
 | 2026-07-03 | 1.1.0 | Updated hook scope to match v1.1.0 behavior (matcher `Bash\|PowerShell`, per-call spawn cost stated plainly, per-file lint); refreshed paths and command names after the skill rename |
 | 2026-04-15 | 1.0.0 | Initial privacy policy |

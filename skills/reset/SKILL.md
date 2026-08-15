@@ -79,5 +79,7 @@ For all issues, delete each remote forgeproof branch.
 
 ## Step 5 — Report
 
-Report what was cleaned up: files deleted, branches removed. Confirm the
-workspace is ready for a fresh `/forgeproof:run` run.
+Report what was cleaned up: files deleted (the chain, the `.rpack`, and —
+for v1.3.0+ runs — the attestation sidecars `issue-<N>.sigstore.json` and
+`issue-<N>.pub.pem`, all removed by the engine in Step 2), branches removed.
+Confirm the workspace is ready for a fresh `/forgeproof:run` run.

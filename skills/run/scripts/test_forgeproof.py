@@ -1852,7 +1852,7 @@ class TestSkillContract:
                     if e.code not in (0, None):
                         failures.append(f"{skill_md.parent.name}: {line}")
         capsys.readouterr()  # swallow argparse usage noise
-        assert checked >= 13, (
+        assert checked >= 17, (
             f"only {checked} engine invocations found across SKILL.md files — "
             "the extractor is broken or the skills no longer document the engine"
         )

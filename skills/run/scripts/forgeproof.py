@@ -1168,7 +1168,8 @@ def _claude_code_version() -> str:
 # scope and trust base (references/rpack-format.md).
 FORGEPROOF_REPO_URL = "https://github.com/ryanjmichie-git/forgeproof-plugin"
 FORGEPROOF_BUILD_TYPE = (
-    FORGEPROOF_REPO_URL + "/blob/main/references/rpack-format.md#slsa-buildtype-v1")
+    FORGEPROOF_REPO_URL
+    + "/blob/main/skills/run/references/rpack-format.md#slsa-buildtype-v1")
 
 
 def forgeproof_builder_id() -> str:
