@@ -801,26 +801,34 @@ class TestCmdReset:
     def test_reset_single_issue(self, tmp_chain_dir, capsys):
         (tmp_chain_dir / "chain-5.json").write_text("[]")
         (tmp_chain_dir / "issue-5.rpack").write_text("{}")
+        (tmp_chain_dir / "issue-5.sigstore.json").write_text("{}")
+        (tmp_chain_dir / "issue-5.pub.pem").write_text("PEM")
 
         fp.cmd_reset(self._make_args(issue="5"))
 
         assert not (tmp_chain_dir / "chain-5.json").exists()
         assert not (tmp_chain_dir / "issue-5.rpack").exists()
+        assert not (tmp_chain_dir / "issue-5.sigstore.json").exists()
+        assert not (tmp_chain_dir / "issue-5.pub.pem").exists()
         output = json.loads(capsys.readouterr().out)
-        assert output["count"] == 2
+        assert output["count"] == 4
 
     def test_reset_all(self, tmp_chain_dir, capsys):
         (tmp_chain_dir / "chain-1.json").write_text("[]")
         (tmp_chain_dir / "chain-2.json").write_text("[]")
         (tmp_chain_dir / "issue-1.rpack").write_text("{}")
+        (tmp_chain_dir / "issue-1.sigstore.json").write_text("{}")
+        (tmp_chain_dir / "issue-2.pub.pem").write_text("PEM")
 
         fp.cmd_reset(self._make_args(all_flag=True))
 
         assert not (tmp_chain_dir / "chain-1.json").exists()
         assert not (tmp_chain_dir / "chain-2.json").exists()
         assert not (tmp_chain_dir / "issue-1.rpack").exists()
+        assert not (tmp_chain_dir / "issue-1.sigstore.json").exists()
+        assert not (tmp_chain_dir / "issue-2.pub.pem").exists()
         output = json.loads(capsys.readouterr().out)
-        assert output["count"] == 3
+        assert output["count"] == 5
 
     def test_reset_nonexistent_issue(self, tmp_chain_dir, capsys):
         fp.cmd_reset(self._make_args(issue="999"))
@@ -1053,10 +1061,16 @@ class TestFinalizeRecheck:
     def _finalize(self, issue, priv):
         args = fp.build_parser().parse_args(
             ["finalize", "--issue", issue, "--commit", "0" * 40])
+        # load_attestation_signer is patched with a REAL signer from a fixed
+        # seed (this class feeds finalize a literal fake_private file the
+        # OpenSSH parser would rightly reject); everything downstream —
+        # statement build, DSSE signing, sidecar writes — still runs for real.
         with patch.object(fp, "get_key_path", return_value=priv), \
              patch.object(fp, "sign_ed25519", return_value="sig"), \
              patch.object(fp, "delete_private_key"), \
              patch.object(fp.shutil, "which", return_value=None), \
+             patch.object(fp, "load_attestation_signer",
+                          return_value=fp.EphemeralEd25519Signer(bytes(32))), \
              patch("sys.stdout"):
             fp.cmd_finalize(args)
 
@@ -3073,6 +3087,8 @@ class TestRecordGuards:
              patch.object(fp, "sign_ed25519", return_value="sig"), \
              patch.object(fp, "delete_private_key"), \
              patch.object(fp.shutil, "which", return_value=None), \
+             patch.object(fp, "load_attestation_signer",
+                          return_value=fp.EphemeralEd25519Signer(bytes(32))), \
              patch("sys.stdout"):
             fp.cmd_finalize(fp.build_parser().parse_args(
                 ["finalize", "--issue", issue, "--commit", "0" * 40]))
@@ -3571,3 +3587,464 @@ class TestDSSEEncoding:
         # Amendment v2: empty publicKey identifier — no hint, no keyid anywhere.
         assert bundle["verificationMaterial"] == {"publicKey": {}}
         assert bundle["dsseEnvelope"] is env
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 Phase 2 — approval action, builder identity, attestation emission
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalAction:
+    """The approval chain action: shape, engine-filled approver, bounded
+    decision values, silent-drop guards, and the explicit fallthrough."""
+
+    def _data(self, argv, approver="dev@example.com"):
+        args = fp.build_parser().parse_args(["record", "--issue", "7", *argv])
+        with patch.object(fp, "_approver_email", return_value=approver):
+            return fp._record_data_from_flags(args)
+
+    def test_approval_block_shape(self):
+        data = self._data(["--action", "approval", "--gate", "plan",
+                           "--decision", "approved", "--note", "LGTM"])
+        assert data == {"gate": "plan", "decision": "approved",
+                        "note": "LGTM", "approver": "dev@example.com"}
+
+    def test_note_optional_defaults_empty(self):
+        data = self._data(["--action", "approval", "--gate", "plan",
+                           "--decision", "rejected"])
+        assert data["note"] == ""
+        assert data["decision"] == "rejected"
+
+    def test_missing_required_flag_dies(self, capsys):
+        args = fp.build_parser().parse_args(
+            ["record", "--issue", "7", "--action", "approval",
+             "--decision", "approved"])
+        with pytest.raises(SystemExit):
+            fp._record_data_from_flags(args)
+        assert "--gate" in capsys.readouterr().err
+
+    def test_cross_action_misuse_rejected(self, capsys):
+        # A stray approval flag on another action must be rejected, not
+        # silently dropped (the _RECORD_DATA_FLAGS trap).
+        args = fp.build_parser().parse_args(
+            ["record", "--issue", "7", "--action", "decision",
+             "--context", "c", "--choice", "x", "--rationale", "r",
+             "--gate", "plan"])
+        with pytest.raises(SystemExit):
+            fp._record_data_from_flags(args)
+        assert "unexpected --gate" in capsys.readouterr().err
+
+    def test_decision_value_is_bounded(self):
+        with pytest.raises(SystemExit):
+            fp.build_parser().parse_args(
+                ["record", "--issue", "7", "--action", "approval",
+                 "--gate", "plan", "--decision", "maybe"])
+
+    def test_approver_from_git_config(self):
+        result = MagicMock(returncode=0, stdout="dev@example.com\n")
+        with patch.object(fp.shutil, "which", return_value="git"), \
+                patch.object(fp, "run", return_value=result):
+            assert fp._approver_email() == "dev@example.com"
+
+    def test_approver_git_absent_is_empty(self):
+        with patch.object(fp.shutil, "which", return_value=None):
+            assert fp._approver_email() == ""
+
+    def test_approver_git_failure_is_empty(self):
+        result = MagicMock(returncode=1, stdout="")
+        with patch.object(fp.shutil, "which", return_value="git"), \
+                patch.object(fp, "run", return_value=result):
+            assert fp._approver_email() == ""
+
+    def test_approver_no_identity_is_empty(self):
+        # git present but no user.email configured: empty stdout, rc 0.
+        result = MagicMock(returncode=0, stdout="\n")
+        with patch.object(fp.shutil, "which", return_value="git"), \
+                patch.object(fp, "run", return_value=result):
+            assert fp._approver_email() == ""
+
+    def test_approver_timeout_is_empty(self):
+        with patch.object(fp.shutil, "which", return_value="git"), \
+                patch.object(fp, "run",
+                             side_effect=subprocess.TimeoutExpired("git", 10)):
+            assert fp._approver_email() == ""
+
+    def test_unbranched_action_dies_loudly(self, capsys):
+        # A future action added to RECORD_FLAG_SPEC without a data-builder
+        # branch must fail loudly, never seal a wrong-shaped dict.
+        ns = fp.argparse.Namespace(
+            action="futureaction",
+            **{f: None for f in fp._RECORD_DATA_FLAGS})
+        with patch.dict(fp.RECORD_FLAG_SPEC,
+                        {"futureaction": {"required": [], "optional": []}}):
+            with pytest.raises(SystemExit):
+                fp._record_data_from_flags(ns)
+        assert "no data builder" in capsys.readouterr().err
+
+    def test_removed_data_flag_mentions_approval(self, capsys):
+        with pytest.raises(SystemExit):
+            fp.build_parser().parse_args(
+                ["record", "--issue", "7", "--action", "approval",
+                 "--data", "{}"])
+        assert "approval --gate --decision" in capsys.readouterr().err
+
+
+def _real_attested_run(tmp_path, monkeypatch, capsys, issue="41",
+                       with_artifact=True, model=None):
+    """Drive the REAL lifecycle (init → records → approval → finalize) with a
+    real ssh-keygen key, returning the emitted bundle, paths, and finalize's
+    result JSON. shutil.which is nulled during finalize so the gh and claude
+    probes stay offline-deterministic (repo_url "", version "unknown")."""
+    _skip_without_sshkeygen()
+    monkeypatch.setattr(fp, "CHAIN_DIR", tmp_path / ".forgeproof")
+    monkeypatch.chdir(tmp_path)
+    parse = fp.build_parser().parse_args
+    fp.cmd_init(parse(["init", "--issue", issue, "--title", "Attest run",
+                       "--requirement", "REQ-1: emit attestation"]))
+    if with_artifact:
+        src = tmp_path / "src"
+        src.mkdir(exist_ok=True)
+        (src / "thing.py").write_text("VALUE = 1\n", encoding="utf-8")
+        fp.cmd_record(parse([
+            "record", "--issue", issue, "--action", "file-edit",
+            "--path", "src/thing.py", "--operation", "create"]))
+    fp.cmd_record(parse([
+        "record", "--issue", issue, "--action", "test-result",
+        "--suite", "pytest", "--passed", "1", "--failed", "0",
+        "--covers", "REQ-1=test_thing"]))
+    with patch.object(fp, "_approver_email", return_value="ryan@example.com"):
+        fp.cmd_record(parse([
+            "record", "--issue", issue, "--action", "approval",
+            "--gate", "plan", "--decision", "approved", "--note", "LGTM"]))
+    capsys.readouterr()
+    argv = ["finalize", "--issue", issue, "--commit", "a" * 40]
+    if model:
+        argv += ["--model", model]
+    with patch.object(fp.shutil, "which", return_value=None):
+        fp.cmd_finalize(parse(argv))
+    result = json.loads(capsys.readouterr().out)
+    chain_dir = tmp_path / ".forgeproof"
+    rpack = chain_dir / f"issue-{issue}.rpack"
+    return {
+        "bundle": json.loads(rpack.read_text(encoding="utf-8")),
+        "rpack": rpack,
+        "sidecar": chain_dir / f"issue-{issue}.sigstore.json",
+        "pem": chain_dir / f"issue-{issue}.pub.pem",
+        "chain": chain_dir / f"chain-{issue}.json",
+        "result": result,
+        "issue": issue,
+    }
+
+
+class TestFinalizeAttestation:
+    """Attestation emission: shapes, byte contracts, subject rules, rollback."""
+
+    def _statement(self, bundle):
+        env = bundle["attestation"]["dsseEnvelope"]
+        return json.loads(base64.b64decode(env["payload"]))
+
+    def test_emits_three_files_with_contracted_shapes(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys)
+        bundle = run["bundle"]
+        assert bundle["version"] == "1.1.0"
+        att = bundle["attestation"]
+        assert att["mediaType"] == (
+            "application/vnd.dev.sigstore.bundle.v0.3+json")
+        assert att["verificationMaterial"] == {"publicKey": {}}
+        env = att["dsseEnvelope"]
+        assert env["payloadType"] == "application/vnd.in-toto+json"
+        assert len(env["signatures"]) == 1
+        assert set(env["signatures"][0]) == {"sig"}
+        # Emission invariant: sidecar bytes == canonical embedded copy, no
+        # newline bytes of either kind, pure ASCII.
+        raw = run["sidecar"].read_bytes()
+        assert raw == fp.canonical_json(att).encode("utf-8")
+        assert b"\x0a" not in raw and b"\x0d" not in raw
+        raw.decode("ascii")
+        pem_bytes = run["pem"].read_bytes()
+        assert b"\r" not in pem_bytes
+        body = run["pem"].read_text(encoding="utf-8").splitlines()[1]
+        assert body.startswith("MCowBQYDK2VwAyEA")
+        spki = base64.b64decode(body)
+        assert spki[12:] == fp.ssh_ed25519_pubkey_bytes(bundle["public_key"])
+
+    def test_finalize_result_lists_sidecar_paths(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="44")
+        result = run["result"]
+        # The existing six keys are untouched; the two new ones are additive.
+        assert set(result) == {
+            "rpack_path", "root_digest", "evaluation_status", "chain_length",
+            "artifacts_count", "requirements_count",
+            "attestation_path", "public_key_path"}
+        assert result["attestation_path"].endswith("issue-44.sigstore.json")
+        assert result["public_key_path"].endswith("issue-44.pub.pem")
+
+    def test_dsse_signature_verifies_and_binds_to_bundle_key(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="45")
+        bundle = run["bundle"]
+        env = bundle["attestation"]["dsseEnvelope"]
+        payload = base64.b64decode(env["payload"])
+        pae = fp.dsse_pae(env["payloadType"], payload)
+        pub = fp.ssh_ed25519_pubkey_bytes(bundle["public_key"])
+        sig = base64.b64decode(env["signatures"][0]["sig"])
+        assert fp.ed25519_verify(pub, pae, sig)
+
+    def test_statement_subjects_equal_artifacts(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="46")
+        bundle = run["bundle"]
+        stmt = self._statement(bundle)
+        assert stmt["_type"] == "https://in-toto.io/Statement/v1"
+        assert stmt["predicateType"] == "https://slsa.dev/provenance/v1"
+        subjects = {(s["name"], s["digest"]["sha256"])
+                    for s in stmt["subject"]}
+        artifacts = {(a["path"], a["sha256"]) for a in bundle["artifacts"]}
+        assert subjects == artifacts
+        assert len(stmt["subject"]) == len(bundle["artifacts"]) > 0
+        for s in stmt["subject"]:
+            assert "sha256" in s["digest"]
+
+    def test_zero_artifact_run_emits_single_chain_subject(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="47",
+                                 with_artifact=False)
+        bundle = run["bundle"]
+        stmt = self._statement(bundle)
+        assert stmt["subject"] == [{
+            "name": ".forgeproof/chain-47.json",
+            "digest": {"sha256": bundle["chain_hash"]}}]
+
+    def test_predicate_carries_approvals_builder_and_chain_metadata(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="48",
+                                 model="claude-fable-5")
+        bundle = run["bundle"]
+        pred = self._statement(bundle)["predicate"]
+        approvals = pred["buildDefinition"]["externalParameters"]["approvals"]
+        assert approvals == [{
+            "gate": "plan", "decision": "approved", "note": "LGTM",
+            "approver": "ryan@example.com", "evidence": "agent-recorded"}]
+        builder = pred["buildDefinition"]["internalParameters"]["builder"]
+        assert builder["model"] == {"id": "claude-fable-5",
+                                    "source": "self-reported"}
+        assert builder["claude_code"] == {"version": "unknown",
+                                          "source": "measured"}
+        assert builder["plugin"] == {"version": fp.PLUGIN_VERSION,
+                                     "source": "engine-constant"}
+        chain_blocks = json.loads(run["chain"].read_text(encoding="utf-8"))
+        meta = pred["runDetails"]["metadata"]
+        assert meta["invocationId"] == chain_blocks[0]["hash"]
+        assert meta["startedOn"] == chain_blocks[0]["timestamp"]
+        assert meta["finishedOn"] == chain_blocks[-1]["timestamp"]
+        chain_desc = [b for b in pred["runDetails"]["byproducts"]
+                      if b["name"] == ".forgeproof/chain-48.json"]
+        assert len(chain_desc) == 1
+        # The byproduct digest is the SAME chain_hash the bundle seals —
+        # LF-normalized decoded text, never a byte re-hash (finding 8).
+        assert chain_desc[0]["digest"]["sha256"] == bundle["chain_hash"]
+        # finalize block carries builder; approval block carries approver
+        assert chain_blocks[-1]["data"]["builder"] == builder
+        approval_blocks = [b for b in chain_blocks
+                           if b["action"] == "approval"]
+        assert len(approval_blocks) == 1
+        assert approval_blocks[0]["data"]["approver"] == "ryan@example.com"
+
+    def test_verify_green_and_attestation_covered_by_root_digest(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="49")
+        code, out = _run_verify(["--rpack", str(run["rpack"])], capsys)
+        assert code == 0
+        assert json.loads(out)["errors"] == []
+        # Flip one value INSIDE the embedded attestation: root_digest must go
+        # red — the attestation is NOT in the bundle_for_hash denylist.
+        bundle = run["bundle"]
+        bundle["attestation"]["mediaType"] = "application/x-evil"
+        run["rpack"].write_text(json.dumps(bundle, indent=2) + "\n",
+                                encoding="utf-8")
+        code, out = _run_verify(["--rpack", str(run["rpack"])], capsys)
+        output = json.loads(out)
+        assert code == 1
+        statuses = {c["name"]: c["status"] for c in output["checks"]}
+        assert statuses["root_digest"] == "fail"
+        assert any(e.startswith("Root digest mismatch") for e in output["errors"])
+
+    def test_denylist_source_grep(self):
+        # The one line that makes the whole design work (finding 1): the
+        # root-digest denylist must stay exactly root_digest + signature.
+        source = FORGEPROOF_PY.read_text(encoding="utf-8")
+        assert 'if k not in ("root_digest", "signature")' in source
+
+    def test_gate_accepts_v13_bundle(self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="50")
+        assert run["rpack"].is_file()
+        event = json.dumps({"tool_name": "Bash",
+                            "tool_input": {"command": "gh pr create --fill"}})
+        monkeypatch.setattr("sys.stdin", io.StringIO(event))
+        with pytest.raises(SystemExit) as exc_info:
+            fp.cmd_gate_pr(fp.argparse.Namespace())
+        capsys.readouterr()
+        assert exc_info.value.code in (0, None)
+
+    # -- failure paths: fake-key fixture, patched signing ---------------------
+
+    def _fake_setup(self, tmp_path, monkeypatch, issue="43"):
+        monkeypatch.setattr(fp, "CHAIN_DIR", tmp_path / ".forgeproof")
+        monkeypatch.chdir(tmp_path)
+        priv = tmp_path / "key"
+        pub = tmp_path / "key.pub"
+        priv.write_text("fake_private")
+        pub.write_text("ssh-ed25519 AAAA fake")
+        artifact = tmp_path / "art.py"
+        artifact.write_text("a = 1\n")
+        with patch.object(fp, "generate_ephemeral_keypair",
+                          return_value=(priv, pub)), \
+                patch.object(fp, "sign_ed25519", return_value="sig"), \
+                patch("sys.stdout"):
+            fp.cmd_init(fp.build_parser().parse_args(
+                ["init", "--issue", issue, "--title", "x", "--force"]))
+            with patch.object(fp, "get_key_path", return_value=priv):
+                fp.cmd_record(fp.build_parser().parse_args(
+                    ["record", "--issue", issue, "--action", "file-edit",
+                     "--path", "art.py", "--operation", "create"]))
+        return issue, priv
+
+    def test_unparseable_key_dies_before_chain_mutation(
+            self, tmp_path, monkeypatch, capsys):
+        issue, priv = self._fake_setup(tmp_path, monkeypatch)
+        chain_file = fp.chain_path(issue)
+        before = chain_file.read_bytes()
+        args = fp.build_parser().parse_args(
+            ["finalize", "--issue", issue, "--commit", "0" * 40])
+        with patch.object(fp, "get_key_path", return_value=priv), \
+                patch.object(fp, "sign_ed25519", return_value="sig"), \
+                patch.object(fp.shutil, "which", return_value=None), \
+                patch("sys.stdout"):
+            with pytest.raises(SystemExit):
+                fp.cmd_finalize(args)
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert chain_file.read_bytes() == before  # chain never mutated
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.rpack").exists()
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.sigstore.json").exists()
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.pub.pem").exists()
+        assert priv.exists()  # retryable: key retained
+
+    def test_attestation_failure_rolls_back_chain(
+            self, tmp_path, monkeypatch, capsys):
+        issue, priv = self._fake_setup(tmp_path, monkeypatch, issue="51")
+        chain_file = fp.chain_path(issue)
+        before = chain_file.read_bytes()
+        args = fp.build_parser().parse_args(
+            ["finalize", "--issue", issue, "--commit", "0" * 40])
+        with patch.object(fp, "get_key_path", return_value=priv), \
+                patch.object(fp, "sign_ed25519", return_value="sig"), \
+                patch.object(fp.shutil, "which", return_value=None), \
+                patch.object(fp, "load_attestation_signer",
+                             return_value=fp.EphemeralEd25519Signer(bytes(32))), \
+                patch.object(fp, "build_attestation",
+                             side_effect=RuntimeError("injected failure")), \
+                patch("sys.stdout"):
+            with pytest.raises(SystemExit):
+                fp.cmd_finalize(args)
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "restored" in err
+        assert chain_file.read_bytes() == before  # rolled back byte-for-byte
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.rpack").exists()
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.sigstore.json").exists()
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.pub.pem").exists()
+        assert priv.exists()
+
+    def test_sidecar_write_failure_rolls_back(
+            self, tmp_path, monkeypatch, capsys):
+        issue, priv = self._fake_setup(tmp_path, monkeypatch, issue="52")
+        chain_file = fp.chain_path(issue)
+        before = chain_file.read_bytes()
+        args = fp.build_parser().parse_args(
+            ["finalize", "--issue", issue, "--commit", "0" * 40])
+        with patch.object(fp, "get_key_path", return_value=priv), \
+                patch.object(fp, "sign_ed25519", return_value="sig"), \
+                patch.object(fp.shutil, "which", return_value=None), \
+                patch.object(fp, "load_attestation_signer",
+                             return_value=fp.EphemeralEd25519Signer(bytes(32))), \
+                patch.object(fp, "ed25519_spki_pem",
+                             side_effect=OSError("disk full")), \
+                patch("sys.stdout"):
+            with pytest.raises(SystemExit):
+                fp.cmd_finalize(args)
+        assert chain_file.read_bytes() == before
+        # No partial outputs left behind either.
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.rpack").exists()
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.sigstore.json").exists()
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.pub.pem").exists()
+        assert priv.exists()
+
+    def test_model_from_magicmock_namespace_is_empty_string(
+            self, tmp_path, monkeypatch, capsys):
+        # A MagicMock namespace returns a truthy Mock for .model; the
+        # cmd_verify:v1.2 discipline (isinstance str) must coerce it to "".
+        issue, priv = self._fake_setup(tmp_path, monkeypatch, issue="53")
+        args = MagicMock()
+        args.issue = issue
+        args.commit = "0" * 40
+        with patch.object(fp, "get_key_path", return_value=priv), \
+                patch.object(fp, "sign_ed25519", return_value="sig"), \
+                patch.object(fp.shutil, "which", return_value=None), \
+                patch.object(fp, "load_attestation_signer",
+                             return_value=fp.EphemeralEd25519Signer(bytes(32))), \
+                patch("sys.stdout"):
+            fp.cmd_finalize(args)
+        chain_blocks = json.loads(fp.chain_path(issue).read_text(encoding="utf-8"))
+        assert chain_blocks[-1]["data"]["builder"]["model"]["id"] == ""
+
+
+class TestVersionAndFormat:
+    """Format version 1.1.0: membership-only recognition, manifest sync."""
+
+    def test_plugin_version_syncs_with_manifest(self):
+        manifest = json.loads(
+            (SCRIPT_DIR.parent.parent.parent / ".claude-plugin" /
+             "plugin.json").read_text(encoding="utf-8"))
+        assert fp.PLUGIN_VERSION == manifest["version"]
+
+    def test_rpack_version_and_membership_set(self):
+        assert fp.RPACK_VERSION == "1.1.0"
+        # Append-only, membership-only — NEVER an ordering (finding 12).
+        assert fp.KNOWN_RPACK_VERSIONS == frozenset({"1.0.0", "1.1.0"})
+
+    def _reversioned(self, tmp_path, version, issue="1"):
+        proj = tmp_path / "proj"
+        rpack = _deploy_v12_project(proj, issue=issue)
+        bundle = json.loads(rpack.read_text(encoding="utf-8"))
+        bundle["version"] = version
+        _sign_bundle(bundle)
+        rpack.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        return proj, rpack
+
+    def test_known_old_version_verifies_without_warning(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._reversioned(tmp_path, "1.0.0")
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        assert code == 0
+        assert output["warnings"] == []
+        fmt = [c for c in output["checks"] if c["name"] == "format"][0]
+        assert fmt["status"] == "ok"
+        # The detail must print the BUNDLE's version, not the engine's.
+        assert "1.0.0" in fmt["detail"]
+
+    def test_unknown_version_warns_with_bundle_version(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._reversioned(tmp_path, "9.9.9")
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        assert code == 0  # unknown version alone is a warning, never an error
+        assert len(output["warnings"]) == 1
+        assert "9.9.9" in output["warnings"][0]
+        fmt = [c for c in output["checks"] if c["name"] == "format"][0]
+        assert fmt["status"] == "warn"

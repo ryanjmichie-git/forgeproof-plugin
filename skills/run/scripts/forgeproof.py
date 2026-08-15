@@ -39,7 +39,14 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 CHAIN_DIR = Path(".forgeproof")
-RPACK_VERSION = "1.0.0"
+# Mirrors .claude-plugin/plugin.json, which stays the single source of
+# version truth — a sync test fails the build if the two ever drift.
+PLUGIN_VERSION = "1.3.0"
+RPACK_VERSION = "1.1.0"
+# Every bundle format version ever shipped. Membership-only and append-only:
+# NEVER an ordering, and no version implies any particular key is present
+# (in-test bundle builders and the frozen fixtures depend on that).
+KNOWN_RPACK_VERSIONS = frozenset({"1.0.0", "1.1.0"})
 RPACK_FORMAT = "forgeproof-rpack"
 GENESIS_PREV_HASH = "0" * 64
 
@@ -903,6 +910,10 @@ def cmd_init(args: argparse.Namespace) -> None:
             path.unlink(missing_ok=True)
             rpack = CHAIN_DIR / f"issue-{issue}.rpack"
             rpack.unlink(missing_ok=True)
+            # Attestation sidecars too: a stale sidecar surviving --force
+            # could later be committed next to a bundle it does not match.
+            (CHAIN_DIR / f"issue-{issue}.sigstore.json").unlink(missing_ok=True)
+            (CHAIN_DIR / f"issue-{issue}.pub.pem").unlink(missing_ok=True)
             key = Path(tempfile.gettempdir()) / f"forgeproof_{issue}_ed25519"
             key.unlink(missing_ok=True)
             Path(f"{key}.pub").unlink(missing_ok=True)
@@ -952,6 +963,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 # Per-action flag contract. Each action builds the exact same data dict shape
 # the v1.0.x --data JSON produced — chain and bundle formats are untouched.
 RECORD_FLAG_SPEC = {
+    "approval": {"required": ["gate", "decision"], "optional": ["note"]},
     "branch-create": {"required": ["branch", "base", "base_sha"], "optional": []},
     "file-edit": {"required": ["path", "operation"], "optional": []},
     "decision": {"required": ["context", "choice", "rationale"], "optional": []},
@@ -959,12 +971,33 @@ RECORD_FLAG_SPEC = {
     "lint-result": {"required": ["tool", "errors", "warnings"], "optional": []},
 }
 
+# Every flag declared in build_parser for record MUST be listed here, or its
+# value is invisible to the missing/unexpected guard below — silently dropped
+# on its own action and silently accepted on every other.
 _RECORD_DATA_FLAGS = [
     "branch", "base", "base_sha", "path", "operation",
     "context", "choice", "rationale",
     "suite", "passed", "failed", "covers", "failed_test",
     "tool", "errors", "warnings",
+    "gate", "decision", "note",
 ]
+
+
+def _approver_email() -> str:
+    """Approver identity for approval blocks, read from git config rather
+    than trusted from a flag. Best-effort by design: returns "" on ANY
+    failure — git absent, no identity configured, non-zero exit, timeout —
+    because an approval record must never die or block on identity lookup.
+    Module-level so tests patch it in one place."""
+    if not shutil.which("git"):
+        return ""
+    try:
+        result = run(["git", "config", "user.email"], timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
 
 
 def _flag_name(attr: str) -> str:
@@ -1054,8 +1087,24 @@ def _record_data_from_flags(args: argparse.Namespace) -> dict:
             "failed_tests": list(args.failed_test or []),
         }
 
-    # lint-result
-    return {"tool": args.tool, "errors": args.errors, "warnings": args.warnings}
+    if action == "approval":
+        # The engine fills approver itself; a flag would let the recording
+        # agent assert an arbitrary identity.
+        return {
+            "gate": args.gate,
+            "decision": args.decision,
+            "note": args.note or "",
+            "approver": _approver_email(),
+        }
+
+    if action == "lint-result":
+        return {"tool": args.tool, "errors": args.errors, "warnings": args.warnings}
+
+    # Explicit fallthrough: an action added to RECORD_FLAG_SPEC without a
+    # branch above must fail loudly, never seal a wrong-shaped data dict
+    # built from unset attributes.
+    die(f"internal error: action '{action}' has no data builder in "
+        "_record_data_from_flags")
 
 
 def cmd_record(args: argparse.Namespace) -> None:
@@ -1095,6 +1144,140 @@ def cmd_record(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Subcommand: finalize
 # ---------------------------------------------------------------------------
+
+
+def _claude_code_version() -> str:
+    """Best-effort Claude Code CLI version probe ('measured' in the builder
+    identity). Resolved through shutil.which ONLY — never exec an env-var
+    path directly; which() also resolves the .cmd shim on Windows — with a
+    hard timeout. Degrades to "unknown" on every failure."""
+    exe = shutil.which("claude")
+    if not exe:
+        return "unknown"
+    try:
+        result = run([exe, "--version"], timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return result.stdout.strip() or "unknown"
+
+
+# Attestation-tier constants. The buildType URI documents the parameter
+# schema; builder.id is version-scoped and resolves to documentation of its
+# scope and trust base (references/rpack-format.md).
+FORGEPROOF_REPO_URL = "https://github.com/ryanjmichie-git/forgeproof-plugin"
+FORGEPROOF_BUILD_TYPE = (
+    FORGEPROOF_REPO_URL + "/blob/main/references/rpack-format.md#slsa-buildtype-v1")
+
+
+def forgeproof_builder_id() -> str:
+    return f"{FORGEPROOF_REPO_URL}/tree/v{PLUGIN_VERSION}"
+
+
+def load_attestation_signer(key_path: Path, public_key: str) -> EphemeralEd25519Signer:
+    """Parse the ephemeral key's seed and bind it to the published public
+    key. Called BEFORE any chain mutation: an attestation in every v1.3
+    bundle is the product promise, so an unparseable or mismatched key is a
+    hard fail while the chain is still un-finalized — never a silently
+    degraded bundle. Module-level so tests that feed finalize a fake key
+    file can patch it."""
+    signer = EphemeralEd25519Signer.from_private_key(key_path)
+    try:
+        expected = ssh_ed25519_pubkey_bytes(public_key)
+    except ValueError as e:
+        die(f"public key file is not a valid ssh-ed25519 line: {e}")
+    if signer.public_bytes != expected:
+        die(f"ephemeral key mismatch: the private key at {key_path} does not "
+            "correspond to the published public key — refusing to sign")
+    return signer
+
+
+def build_intoto_statement(bundle: dict, chain: list[dict],
+                           approvals: list[dict], repo_url: str) -> dict:
+    """in-toto Statement v1 carrying a SLSA Provenance v1 predicate.
+    Deterministic and time-free: timestamps are copied verbatim from chain
+    blocks (already RFC 3339 UTC) and invocationId is the genesis hash."""
+    issue_num = bundle["issue"]["number"]
+    chain_name = f".forgeproof/chain-{issue_num}.json"
+    subjects = [{"name": a["path"], "digest": {"sha256": a["sha256"]}}
+                for a in bundle["artifacts"]]
+    if not subjects:
+        # A statement subject may not be empty (in-toto rejects it), so a
+        # zero-file-edit run attests the chain itself.
+        subjects = [{"name": chain_name,
+                     "digest": {"sha256": bundle["chain_hash"]}}]
+
+    resolved = []
+    for block in chain:
+        if block.get("action") == "branch-create":
+            data = block.get("data", {})
+            base = data.get("base", "")
+            uri = (f"git+{repo_url}@refs/heads/{base}" if repo_url
+                   else f"git+refs/heads/{base}")
+            resolved.append({"uri": uri,
+                             "digest": {"gitCommit": data.get("base_sha", "")}})
+            break
+
+    genesis = chain[0]
+    finalize_block = chain[-1]
+    builder_identity = finalize_block.get("data", {}).get("builder", {})
+
+    predicate = {
+        "buildDefinition": {
+            "buildType": FORGEPROOF_BUILD_TYPE,
+            "externalParameters": {
+                "issue": bundle["issue"],
+                "requirements": bundle["requirements"],
+                # The AI records that the human approved: asserted evidence,
+                # not cryptographic proof of consent.
+                "approvals": [dict(a, evidence="agent-recorded")
+                              for a in approvals],
+            },
+            "internalParameters": {"builder": builder_identity},
+            "resolvedDependencies": resolved,
+        },
+        "runDetails": {
+            "builder": {"id": forgeproof_builder_id()},
+            "metadata": {
+                "invocationId": genesis["hash"],
+                "startedOn": genesis["timestamp"],
+                "finishedOn": finalize_block["timestamp"],
+            },
+            "byproducts": [
+                {
+                    "name": chain_name,
+                    # MUST be the same chain_hash the bundle seals: sha256
+                    # over the UTF-8, LF-normalized DECODED TEXT of the chain
+                    # file, never a re-hash of its raw bytes (which would
+                    # false-red every Windows-authored bundle).
+                    "digest": {"sha256": bundle["chain_hash"]},
+                    "annotations": {
+                        "digestOver": "utf-8 lf-normalized decoded text"},
+                },
+                {
+                    "name": "evaluation",
+                    "mediaType": "application/json",
+                    "content": base64.b64encode(
+                        canonical_json(bundle["evaluation"]).encode("utf-8")
+                    ).decode("ascii"),
+                },
+            ],
+        },
+    }
+    return {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": subjects,
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "predicate": predicate,
+    }
+
+
+def build_attestation(statement: dict, signer) -> dict:
+    """DSSE-sign a statement and wrap it in a Sigstore bundle. Module-level
+    so finalize tests can patch it for failure injection."""
+    payload = canonical_json(statement).encode("utf-8")
+    return build_sigstore_bundle(build_dsse_envelope(payload, signer), signer)
 
 
 def cmd_finalize(args: argparse.Namespace) -> None:
@@ -1145,11 +1328,30 @@ def cmd_finalize(args: argparse.Namespace) -> None:
             "and re-run finalize."
         )
 
+    # Parse the attestation signing seed and bind it to the published public
+    # key BEFORE any chain mutation: an attestation in every v1.3 bundle is
+    # the product promise, so an unparseable or mismatched key must hard-fail
+    # while the chain is still un-finalized (resolved question 8).
+    attestation_signer = load_attestation_signer(key_path, public_key)
+
+    # Builder identity, with per-field provenance labels. The model id is
+    # whatever the agent claims; the same shape-check discipline as
+    # cmd_verify's flag reads keeps a MagicMock namespace from leaking a
+    # non-string into json.dumps.
+    model = getattr(args, "model", None)
+    model = model if isinstance(model, str) else ""
+    builder_identity = {
+        "model": {"id": model, "source": "self-reported"},
+        "claude_code": {"version": _claude_code_version(), "source": "measured"},
+        "plugin": {"version": PLUGIN_VERSION, "source": "engine-constant"},
+    }
+
     # Build finalize block
     last_block = chain[-1]
     finalize_data = {
         "commit_sha": args.commit,
         "chain_length": len(chain) + 1,  # including the finalize block itself
+        "builder": builder_identity,
     }
 
     finalize_block = build_block(
@@ -1160,143 +1362,197 @@ def cmd_finalize(args: argparse.Namespace) -> None:
         key_path=key_path,
     )
 
-    chain.append(finalize_block)
-    save_chain(issue, chain)
-
-    # Extract data from chain for the bundle
-    genesis = chain[0]
-    issue_data = genesis["data"]
-
-    # Collect artifacts, decisions, and evaluation data from chain.
-    # Artifacts are deduplicated per path keeping the latest record, so a
-    # re-edited file appears once, with the hash that matches disk at signing
-    # time (the full edit history stays in the chain).
-    artifacts_by_path: dict[str, dict] = {}
-    decisions = []
-    test_results = []
-    lint_results = []
-
-    for block in chain:
-        action = block["action"]
-        d = block["data"]
-        if action == "file-edit":
-            artifacts_by_path[d.get("path", "")] = {
-                "path": d.get("path", ""),
-                "operation": d.get("operation", ""),
-                "sha256": d.get("sha256", ""),
-            }
-        elif action == "decision":
-            decisions.append({
-                "context": d.get("context", ""),
-                "choice": d.get("choice", ""),
-                "rationale": d.get("rationale", ""),
-            })
-        elif action == "test-result":
-            test_results.append(d)
-        elif action == "lint-result":
-            lint_results.append(d)
-
-    artifacts = list(artifacts_by_path.values())
-
-    # Compute evaluation status
-    total_passed = sum(t.get("passed", 0) for t in test_results)
-    total_failed = sum(t.get("failed", 0) for t in test_results)
-    total_lint_errors = sum(l.get("errors", 0) for l in lint_results)
-
-    # Collect coverage and failure info
-    all_coverage = {}
-    for t in test_results:
-        for req_id, tests in t.get("coverage", {}).items():
-            all_coverage.setdefault(req_id, []).extend(tests)
-
-    all_reqs = issue_data.get("requirements", [])
-    req_ids = []
-    for r in all_reqs:
-        if isinstance(r, str) and ":" in r:
-            req_ids.append(r.split(":")[0].strip())
-        elif isinstance(r, dict):
-            req_ids.append(r.get("id", ""))
-
-    uncovered = [rid for rid in req_ids if rid not in all_coverage] if req_ids else []
-    failed_tests = []
-    for t in test_results:
-        failed_tests.extend(t.get("failed_tests", []))
-
-    if total_failed == 0 and total_lint_errors == 0 and not uncovered:
-        eval_status = "pass"
-    elif total_passed == 0 and total_failed > 0:
-        eval_status = "fail"
-    else:
-        eval_status = "partial"
-
-    coverage_pct = "0%"
-    if req_ids:
-        covered_count = len(req_ids) - len(uncovered)
-        coverage_pct = f"{round(covered_count / len(req_ids) * 100)}%"
-
-    # Get repo URL from gh if available
-    repo_url = ""
-    if shutil.which("gh"):
-        gh_result = run(["gh", "repo", "view", "--json", "url", "-q", ".url"])
-        if gh_result.returncode == 0:
-            repo_url = gh_result.stdout.strip()
-
-    # Build requirements list for bundle
-    bundle_reqs = []
-    for r in all_reqs:
-        if isinstance(r, str) and ":" in r:
-            rid, rtext = r.split(":", 1)
-            rid = rid.strip()
-            rtext = rtext.strip()
-        elif isinstance(r, dict):
-            rid = r.get("id", "")
-            rtext = r.get("text", "")
-        else:
-            continue
-        status = "covered" if rid in all_coverage else "uncovered"
-        bundle_reqs.append({
-            "id": rid,
-            "text": rtext,
-            "status": status,
-            "tests": all_coverage.get(rid, []),
-        })
-
-    # Assemble the bundle (without root_digest and signature yet)
-    bundle = {
-        "version": RPACK_VERSION,
-        "format": RPACK_FORMAT,
-        "issue": {
-            "number": issue_data.get("issue", int(issue)),
-            "title": issue_data.get("title", ""),
-            "url": f"{repo_url}/issues/{issue}" if repo_url else "",
-        },
-        "requirements": bundle_reqs,
-        "artifacts": artifacts,
-        "decisions": decisions,
-        "evaluation": {
-            "status": eval_status,
-            "tests_passed": total_passed,
-            "tests_failed": total_failed,
-            "lint_errors": total_lint_errors,
-            "requirement_coverage": coverage_pct,
-            "uncovered_requirements": uncovered,
-            "failed_tests": failed_tests,
-        },
-        "chain_hash": sha256_hex(chain_path(issue).read_text()),
-        "public_key": public_key,
-    }
-
-    # Compute root digest over the bundle content
-    root_digest = sha256_hex(canonical_json(bundle))
-    bundle["root_digest"] = root_digest
-
-    # Sign the root digest
-    bundle["signature"] = sign_ed25519(root_digest, key_path)
-
-    # Write the .rpack file
-    CHAIN_DIR.mkdir(exist_ok=True)
+    # Everything from the chain append through the sidecar writes runs under
+    # a rollback guard. chain_hash is derived from the chain file ON DISK
+    # (LF-normalized decoded text), so the chain must be saved before the
+    # attestation can be built; if anything after that save fails, the chain
+    # file is restored byte-for-byte and every partial output removed, so a
+    # failed finalize never strands a finalized chain without its outputs.
+    # The private key is deleted only after all outputs, keeping the run
+    # retryable.
+    chain_file = chain_path(issue)
+    chain_before = chain_file.read_bytes()
     rpack_path = CHAIN_DIR / f"issue-{issue}.rpack"
-    rpack_path.write_text(json.dumps(bundle, indent=2) + "\n")
+    attestation_path = CHAIN_DIR / f"issue-{issue}.sigstore.json"
+    pem_path = CHAIN_DIR / f"issue-{issue}.pub.pem"
+    try:
+        chain.append(finalize_block)
+        save_chain(issue, chain)
+
+        # Extract data from chain for the bundle
+        genesis = chain[0]
+        issue_data = genesis["data"]
+
+        # Collect artifacts, decisions, approvals, and evaluation data from
+        # chain. Artifacts are deduplicated per path keeping the latest
+        # record, so a re-edited file appears once, with the hash that
+        # matches disk at signing time (the full edit history stays in the
+        # chain).
+        artifacts_by_path: dict[str, dict] = {}
+        decisions = []
+        approvals = []
+        test_results = []
+        lint_results = []
+
+        for block in chain:
+            action = block["action"]
+            d = block["data"]
+            if action == "file-edit":
+                artifacts_by_path[d.get("path", "")] = {
+                    "path": d.get("path", ""),
+                    "operation": d.get("operation", ""),
+                    "sha256": d.get("sha256", ""),
+                }
+            elif action == "decision":
+                decisions.append({
+                    "context": d.get("context", ""),
+                    "choice": d.get("choice", ""),
+                    "rationale": d.get("rationale", ""),
+                })
+            elif action == "approval":
+                approvals.append({
+                    "gate": d.get("gate", ""),
+                    "decision": d.get("decision", ""),
+                    "note": d.get("note", ""),
+                    "approver": d.get("approver", ""),
+                })
+            elif action == "test-result":
+                test_results.append(d)
+            elif action == "lint-result":
+                lint_results.append(d)
+
+        artifacts = list(artifacts_by_path.values())
+
+        # Compute evaluation status
+        total_passed = sum(t.get("passed", 0) for t in test_results)
+        total_failed = sum(t.get("failed", 0) for t in test_results)
+        total_lint_errors = sum(l.get("errors", 0) for l in lint_results)
+
+        # Collect coverage and failure info
+        all_coverage = {}
+        for t in test_results:
+            for req_id, tests in t.get("coverage", {}).items():
+                all_coverage.setdefault(req_id, []).extend(tests)
+
+        all_reqs = issue_data.get("requirements", [])
+        req_ids = []
+        for r in all_reqs:
+            if isinstance(r, str) and ":" in r:
+                req_ids.append(r.split(":")[0].strip())
+            elif isinstance(r, dict):
+                req_ids.append(r.get("id", ""))
+
+        uncovered = [rid for rid in req_ids if rid not in all_coverage] if req_ids else []
+        failed_tests = []
+        for t in test_results:
+            failed_tests.extend(t.get("failed_tests", []))
+
+        if total_failed == 0 and total_lint_errors == 0 and not uncovered:
+            eval_status = "pass"
+        elif total_passed == 0 and total_failed > 0:
+            eval_status = "fail"
+        else:
+            eval_status = "partial"
+
+        coverage_pct = "0%"
+        if req_ids:
+            covered_count = len(req_ids) - len(uncovered)
+            coverage_pct = f"{round(covered_count / len(req_ids) * 100)}%"
+
+        # Get repo URL from gh if available
+        repo_url = ""
+        if shutil.which("gh"):
+            gh_result = run(["gh", "repo", "view", "--json", "url", "-q", ".url"])
+            if gh_result.returncode == 0:
+                repo_url = gh_result.stdout.strip()
+
+        # Build requirements list for bundle
+        bundle_reqs = []
+        for r in all_reqs:
+            if isinstance(r, str) and ":" in r:
+                rid, rtext = r.split(":", 1)
+                rid = rid.strip()
+                rtext = rtext.strip()
+            elif isinstance(r, dict):
+                rid = r.get("id", "")
+                rtext = r.get("text", "")
+            else:
+                continue
+            status = "covered" if rid in all_coverage else "uncovered"
+            bundle_reqs.append({
+                "id": rid,
+                "text": rtext,
+                "status": status,
+                "tests": all_coverage.get(rid, []),
+            })
+
+        # Assemble the bundle (without root_digest and signature yet)
+        bundle = {
+            "version": RPACK_VERSION,
+            "format": RPACK_FORMAT,
+            "issue": {
+                "number": issue_data.get("issue", int(issue)),
+                "title": issue_data.get("title", ""),
+                "url": f"{repo_url}/issues/{issue}" if repo_url else "",
+            },
+            "requirements": bundle_reqs,
+            "artifacts": artifacts,
+            "decisions": decisions,
+            "evaluation": {
+                "status": eval_status,
+                "tests_passed": total_passed,
+                "tests_failed": total_failed,
+                "lint_errors": total_lint_errors,
+                "requirement_coverage": coverage_pct,
+                "uncovered_requirements": uncovered,
+                "failed_tests": failed_tests,
+            },
+            "chain_hash": sha256_hex(chain_path(issue).read_text()),
+            "public_key": public_key,
+        }
+
+        # Attestation: a statement over the assembled bundle core, DSSE-signed
+        # with the same ephemeral key, embedded BEFORE root_digest is computed
+        # so the SSHSIG covers it (and pre-v1.3 verifiers hash it blindly via
+        # the denylist). Serialized to its canonical string ONCE — the sidecar
+        # must be byte-identical to canonical_json of the embedded copy.
+        statement = build_intoto_statement(bundle, chain, approvals, repo_url)
+        attestation_bundle = build_attestation(statement, attestation_signer)
+        attestation_canon = canonical_json(attestation_bundle)
+        bundle["attestation"] = attestation_bundle
+
+        # Compute root digest over the bundle content
+        root_digest = sha256_hex(canonical_json(bundle))
+        bundle["root_digest"] = root_digest
+
+        # Sign the root digest
+        bundle["signature"] = sign_ed25519(root_digest, key_path)
+
+        # Write the .rpack file, then the sidecars — all before the key
+        # deletion below (anything after it would operate on a deleted key).
+        CHAIN_DIR.mkdir(exist_ok=True)
+        rpack_path.write_text(json.dumps(bundle, indent=2) + "\n")
+
+        # Sidecar contracts: the .sigstore.json is the same canonical string
+        # as the embedded copy with NO newline characters at all, written with
+        # explicit encoding and newline="" so neither Python nor git can
+        # translate anything; the PEM is LF-only. Never copy save_chain or the
+        # rpack write above — both append "\n" with default translation.
+        attestation_path.write_text(attestation_canon,
+                                    encoding="utf-8", newline="")
+        pem_path.write_text(ed25519_spki_pem(attestation_signer.public_bytes),
+                            encoding="utf-8", newline="\n")
+    except BaseException as e:
+        chain_file.write_bytes(chain_before)
+        rpack_path.unlink(missing_ok=True)
+        attestation_path.unlink(missing_ok=True)
+        pem_path.unlink(missing_ok=True)
+        info("finalize failed after the chain was updated — chain file "
+             "restored, partial outputs removed")
+        if isinstance(e, (SystemExit, KeyboardInterrupt)):
+            raise
+        die(f"finalize failed while building outputs ({e}); chain restored, "
+            "ephemeral key retained — fix the cause and re-run finalize")
 
     # Delete ephemeral private key
     delete_private_key(key_path)
@@ -1309,6 +1565,8 @@ def cmd_finalize(args: argparse.Namespace) -> None:
         "chain_length": len(chain),
         "artifacts_count": len(artifacts),
         "requirements_count": len(bundle_reqs),
+        "attestation_path": str(attestation_path),
+        "public_key_path": str(pem_path),
     }
     print(json.dumps(result, indent=2))
     info(f"Bundle written: {rpack_path}")
@@ -1489,20 +1747,27 @@ def cmd_verify(args: argparse.Namespace) -> None:
     anchor = resolve_verify_anchor(rpack_path, project_root)
     info(f"Verify anchor: {anchor}")
 
-    # 1. Check format and version
+    # 1. Check format and version. Version recognition is MEMBERSHIP in
+    # KNOWN_RPACK_VERSIONS — never equality with RPACK_VERSION and never an
+    # ordering — so every version this engine line has ever shipped verifies
+    # without a spurious warning, forever. The detail prints the BUNDLE's
+    # version: an audit report must describe the bundle it verified, not the
+    # verifier that ran.
     format_ok = bundle.get("format") == RPACK_FORMAT
-    version_ok = bundle.get("version") == RPACK_VERSION
+    version_known = bundle.get("version") in KNOWN_RPACK_VERSIONS
+    unknown_version_msg = (
+        f"Unknown bundle version: {bundle.get('version')} "
+        f"(known: {', '.join(sorted(KNOWN_RPACK_VERSIONS))})")
     if not format_ok:
         errors.append(f"Unknown format: {bundle.get('format')}")
-    if not version_ok:
-        warnings.append(f"Version mismatch: expected {RPACK_VERSION}, got {bundle.get('version')}")
+    if not version_known:
+        warnings.append(unknown_version_msg)
     if not format_ok:
         check("format", "fail", f"Unknown format: {bundle.get('format')}")
-    elif not version_ok:
-        check("format", "warn",
-              f"Version mismatch: expected {RPACK_VERSION}, got {bundle.get('version')}")
+    elif not version_known:
+        check("format", "warn", unknown_version_msg)
     else:
-        check("format", "ok", f"{RPACK_FORMAT} v{RPACK_VERSION}")
+        check("format", "ok", f"{RPACK_FORMAT} v{bundle.get('version')}")
 
     # 2. Verify root digest
     stored_digest = bundle.get("root_digest", "")
@@ -1791,6 +2056,10 @@ def cmd_summary(args: argparse.Namespace) -> None:
         die(f"bundle is missing required fields (corrupt or not a ForgeProof "
             f"bundle): {rpack_path}")
 
+    # Additive v1.3 key, read OUTSIDE the required-field guard above: a
+    # pre-v1.3 bundle without it must never be declared corrupt.
+    attestation = bundle.get("attestation")
+
     # Status emoji
     status_badge = {"pass": "PASS", "partial": "PARTIAL", "fail": "FAIL"}.get(status, "UNKNOWN")
 
@@ -1831,6 +2100,19 @@ def cmd_summary(args: argparse.Namespace) -> None:
     ])
     for a in artifacts:
         lines.append(f"- `{a['path']}` ({a['operation']})")
+
+    if isinstance(attestation, dict):
+        lines.extend([
+            "",
+            "### Attestation",
+            "",
+            f"- Sigstore bundle: `.forgeproof/issue-{issue}.sigstore.json`",
+            f"- Public key (SPKI PEM): `.forgeproof/issue-{issue}.pub.pem`",
+            "- Verify without ForgeProof (optional): "
+            f"`cosign verify-blob-attestation --key .forgeproof/issue-{issue}.pub.pem "
+            f"--bundle .forgeproof/issue-{issue}.sigstore.json "
+            "--type slsaprovenance1 --insecure-ignore-tlog <artifact-path>`",
+        ])
 
     lines.extend([
         "",
@@ -1994,6 +2276,14 @@ def cmd_reset(args: argparse.Namespace) -> None:
             for f in CHAIN_DIR.glob("issue-*.rpack"):
                 f.unlink()
                 deleted.append(str(f))
+            # Attestation sidecars: two NAMED globs, never a broad issue-*
+            # (which would also eat unrelated files someone parked there).
+            for f in CHAIN_DIR.glob("issue-*.sigstore.json"):
+                f.unlink()
+                deleted.append(str(f))
+            for f in CHAIN_DIR.glob("issue-*.pub.pem"):
+                f.unlink()
+                deleted.append(str(f))
         # Clean up temp keys
         tmpdir = Path(tempfile.gettempdir())
         for f in tmpdir.glob("forgeproof_*_ed25519*"):
@@ -2009,6 +2299,14 @@ def cmd_reset(args: argparse.Namespace) -> None:
         if rpack.exists():
             rpack.unlink()
             deleted.append(str(rpack))
+        attestation = CHAIN_DIR / f"issue-{issue}.sigstore.json"
+        if attestation.exists():
+            attestation.unlink()
+            deleted.append(str(attestation))
+        pem = CHAIN_DIR / f"issue-{issue}.pub.pem"
+        if pem.exists():
+            pem.unlink()
+            deleted.append(str(pem))
         # Clean up ephemeral key
         key = Path(tempfile.gettempdir()) / f"forgeproof_{issue}_ed25519"
         key.unlink(missing_ok=True)
@@ -2138,7 +2436,8 @@ class _RemovedDataFlag(argparse.Action):
             "file-edit --path --operation (sha256 is computed by the engine) | "
             "decision --context --choice --rationale | "
             "test-result --suite --passed --failed [--covers 'REQ-1=test_a,test_b'] [--failed-test NAME] | "
-            "lint-result --tool --errors --warnings"
+            "lint-result --tool --errors --warnings | "
+            "approval --gate --decision [--note]"
         )
 
 
@@ -2195,11 +2494,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tool", help="[lint-result] Linter name")
     p.add_argument("--errors", type=int, help="[lint-result] Error count")
     p.add_argument("--warnings", type=int, help="[lint-result] Warning count")
+    # approval
+    p.add_argument("--gate", help="[approval] Gate the human approved (e.g. plan)")
+    p.add_argument("--decision",
+                   choices=["approved", "rejected", "changes-requested"],
+                   help="[approval] Human decision at the gate")
+    p.add_argument("--note", help="[approval] Optional approval note")
 
     # finalize
     p = sub.add_parser("finalize", help="Finalize chain and build .rpack")
     p.add_argument("--issue", required=True, help="Issue number")
     p.add_argument("--commit", required=True, help="Commit SHA")
+    p.add_argument("--model",
+                   help="Model id the agent reports it is running as "
+                        "(recorded self-reported in the builder identity)")
 
     # verify
     p = sub.add_parser("verify", help="Verify a .rpack bundle")
