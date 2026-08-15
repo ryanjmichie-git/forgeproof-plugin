@@ -81,6 +81,17 @@ Dependency order: spike + third compat fixture before any engine change (0) → 
    `--insecure-ignore-tlog` is mandatory: with `--key`, cosign appends `WithTransparencyLog(1)` unless told otherwise, and an offline bundle has no Rekor entry. Exactly one variant prints "Verified OK". Record the winning variant, the exact command, and both binary versions in this document — Phase 5 hard-codes them.
    **Contingency:** if neither variant verifies on either binary, stop and escalate before Phase 1 (Risk 1).
 
+   > **SPIKE RESULT (recorded 2026-08-15; spike run on Windows 11, official `cosign-windows-amd64.exe` release binaries; signer KAT-checked against RFC 8032 §7.1 TEST 1 before use):**
+   > - **Winning variant: A — plain Ed25519 over `PAE(payloadType, payload)`.** Ed25519ph (variant B) fails on both binaries — finding 4 confirmed empirically.
+   > - **Binaries:** cosign `GitVersion: v2.6.5` (go1.26.4) and `GitVersion: v3.1.3` (go1.26.4). Both auto-detect the v0.3 bundle media type; `--new-bundle-format` is not needed on either.
+   > - **Exact command (prints `Verified OK`, exit 0, on both binaries):**
+   >   ```
+   >   cosign verify-blob-attestation --key issue-N.pub.pem --bundle issue-N.sigstore.json \
+   >     --type slsaprovenance1 --insecure-ignore-tlog --digest <subject sha256 hex> --digestAlg sha256
+   >   ```
+   > - **PLAN AMENDMENT (supersedes the `keyid` clause of Phase 1 item 6 and the matching Phase 2 item 9 assertion): the DSSE signature must carry NO `keyid` field.** go-securesystemslib's envelope verifier *skips* any signature whose non-empty `keyid` differs from the verifier's own computed keyid (symptom: `accepted signatures do not match threshold, Found: 0, Expected 1`), and the keyid cosign derives from `--key` matches neither `base64_std(sha256(spki_der))` nor its hex form. With `keyid` omitted the signature is always attempted, on both binaries. `verificationMaterial.publicKey.hint` stays `base64_std(sha256(spki_der))` and is accepted by both binaries with no matching `keyid` present. The Phase 2 item 9 assertion becomes: `signatures[0]` has no `keyid` key; `hint == base64_std(sha256(spki_der))`; `len(signatures) == 1` unchanged.
+   > - **Negative controls, proven failing on both binaries:** Ed25519ph signature ⇒ exit 1; DSSE payload byte-flip ⇒ exit 1.
+
 Verification: full pytest green (198 + new); fixture committed LF-only; spike result recorded with both cosign versions.
 Commit: `test: freeze v1.2.2 compat fixture and pin the cosign interop contract ahead of attestation work`
 

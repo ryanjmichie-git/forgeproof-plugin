@@ -1,0 +1,87 @@
+[
+  {
+    "index": 0,
+    "timestamp": "2026-08-15T15:16:56.681557+00:00",
+    "action": "genesis",
+    "data": {
+      "issue": 997,
+      "title": "v122 fixture",
+      "requirements": [
+        "REQ-1: fixture requirement"
+      ]
+    },
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "hash": "c80d85b92796aa39724f3d4be225f2b90638278bef33c1aee633f292b395cf0b",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgyzGzOanP2dLeCqEUTZIRK69069\nFhQnE9AJnW/zAy+fIAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEA9NjJygUpN2E7DqXn43NvXgQRsVh53Hy8cxM+Xjh09FXhwC0IbGHofSL\nE58LOVo60t6FAbb0xIcKu4XZb2xtsI\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 1,
+    "timestamp": "2026-08-15T15:16:56.781998+00:00",
+    "action": "file-edit",
+    "data": {
+      "path": "src/example3.py",
+      "operation": "create",
+      "sha256": "9fce34415371bd56386fdf2ee0614d11b52147b75427b60b8323ad3f1a7a1124"
+    },
+    "prev_hash": "c80d85b92796aa39724f3d4be225f2b90638278bef33c1aee633f292b395cf0b",
+    "hash": "f65c55699dea8eecbc4cc236b8a25f06d6bcfb917cff032ed1cb009c7b48ade3",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgyzGzOanP2dLeCqEUTZIRK69069\nFhQnE9AJnW/zAy+fIAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEC+4WiHT9hF2qMqE++CyOb7j13oxgO7TZHN03z7+6T3MjwJURFIOHcFx5\nQxYH4xazgrr86yPz/+LlUGXYmXgwAL\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 2,
+    "timestamp": "2026-08-15T15:16:56.878949+00:00",
+    "action": "decision",
+    "data": {
+      "context": "c",
+      "choice": "x",
+      "rationale": "r"
+    },
+    "prev_hash": "f65c55699dea8eecbc4cc236b8a25f06d6bcfb917cff032ed1cb009c7b48ade3",
+    "hash": "d90e3a008c126f3dcb1ebdbb96d4876deac92d4ed519fdb92317acf1843d0152",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgyzGzOanP2dLeCqEUTZIRK69069\nFhQnE9AJnW/zAy+fIAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAECSbTci/dzcBcbyhhQ9HY6FMOjfl890pt155xBDAV/tK4tmdhXbogBvvg\nZ8TZhqBcXdPNkSLetLIQ4wGK7MsusG\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 3,
+    "timestamp": "2026-08-15T15:16:56.978790+00:00",
+    "action": "test-result",
+    "data": {
+      "suite": "fixture",
+      "passed": 1,
+      "failed": 0,
+      "coverage": {
+        "REQ-1": [
+          "test_fixture"
+        ]
+      },
+      "failed_tests": []
+    },
+    "prev_hash": "d90e3a008c126f3dcb1ebdbb96d4876deac92d4ed519fdb92317acf1843d0152",
+    "hash": "a8092ca79649cce2c77173d6a517ae6c9fdb3fb6f917e90afd491e64139bef59",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgyzGzOanP2dLeCqEUTZIRK69069\nFhQnE9AJnW/zAy+fIAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAECSGMkqhEpDbtzEwEPcBQ4HPJfv2TD5hn6CuxEsey2w99+knO5uEqihPN\n8RJE0pu7Ubl3fe1PZaP8Ln5rX4nAMD\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 4,
+    "timestamp": "2026-08-15T15:16:57.078163+00:00",
+    "action": "lint-result",
+    "data": {
+      "tool": "fixture-lint",
+      "errors": 0,
+      "warnings": 0
+    },
+    "prev_hash": "a8092ca79649cce2c77173d6a517ae6c9fdb3fb6f917e90afd491e64139bef59",
+    "hash": "d7231d6c6316032101f0066d5ca973a5f48570ea568dee890d325d10fb104b74",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgyzGzOanP2dLeCqEUTZIRK69069\nFhQnE9AJnW/zAy+fIAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEAlF7W/XL43rMPKVCgojMRkWJX8rMwBmUq3Tlc/q9eKlG97d5fYbN8V/r\ncSveL1YEofUglc4uECOUmP8+MZtuUH\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 5,
+    "timestamp": "2026-08-15T15:16:57.182509+00:00",
+    "action": "finalize",
+    "data": {
+      "commit_sha": "0000000000000000000000000000000000000000",
+      "chain_length": 6
+    },
+    "prev_hash": "d7231d6c6316032101f0066d5ca973a5f48570ea568dee890d325d10fb104b74",
+    "hash": "370862628ae016f55f28aa5560fa0deb8eed97f63a327fec3f206b8d6f8a3338",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgyzGzOanP2dLeCqEUTZIRK69069\nFhQnE9AJnW/zAy+fIAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEDXqxTASY9prEqsJJYBUsdvCLgNrc8+bTYKbV8C0GLynP2shL1pkAYvki\nujCu5PhwqlaM33R6xccZQdsgV2/jYE\n-----END SSH SIGNATURE-----"
+  }
+]
