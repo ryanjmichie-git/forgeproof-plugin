@@ -1594,7 +1594,60 @@ TAMPER_ERROR_MARKERS = (
     "Artifact tampered",
     "Artifact is not a file",
     "trailing or altered",
+    # v1.3 attestation invariants. These strings deliberately avoid the
+    # legacy "hash mismatch"/"prev_hash" fragments (substring matching), and
+    # "Attestation malformed" errors deliberately match NONE of these —
+    # signed-malformed content is an engine bug, not evidence of alteration.
+    "Attestation signature invalid",
+    "Attestation key mismatch",
+    "Attestation subjects",
+    "Attestation chain digest",
 )
+
+
+def _attestation_statement(att: Any) -> "tuple[dict | None, bytes | None, str]":
+    """Parse and shape-check an embedded attestation, returning
+    (statement, payload_bytes, problem) with problem == "" on success.
+
+    Every input byte is attacker-controlled, so every failure is a clean
+    description and never an exception — including the payload json parse,
+    which is a NEW json.loads over hostile bytes and carries the same guard
+    trio as read_json_file. Problem strings must never embed attacker values:
+    they feed error strings whose tamper classification is substring-based,
+    so embedded content could forge a tamper (or hide one)."""
+    if not isinstance(att, dict):
+        return None, None, "attestation is not an object"
+    env = att.get("dsseEnvelope")
+    if not isinstance(env, dict):
+        return None, None, "dsseEnvelope missing or not an object"
+    if env.get("payloadType") != DSSE_PAYLOAD_TYPE:
+        return None, None, "unexpected payloadType"
+    sigs = env.get("signatures")
+    if not isinstance(sigs, list) or len(sigs) != 1:
+        return None, None, "expected exactly one signature"
+    if not isinstance(sigs[0], dict) or not isinstance(sigs[0].get("sig"), str):
+        return None, None, "signature entry malformed"
+    payload_b64 = env.get("payload")
+    if not isinstance(payload_b64, str):
+        return None, None, "payload missing or not a string"
+    try:
+        payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+    except (ValueError, UnicodeEncodeError):
+        return None, None, "payload is not valid base64"
+    try:
+        statement = json.loads(payload.decode("utf-8"))
+    except (json.JSONDecodeError, ValueError, RecursionError,
+            UnicodeDecodeError):
+        return None, None, "payload is not valid JSON"
+    if not isinstance(statement, dict):
+        return None, None, "statement is not an object"
+    if statement.get("_type") != "https://in-toto.io/Statement/v1":
+        return None, None, "unexpected statement _type"
+    if statement.get("predicateType") != "https://slsa.dev/provenance/v1":
+        return None, None, "unexpected predicateType"
+    if not isinstance(statement.get("subject"), list) or not statement["subject"]:
+        return None, None, "subject missing or empty"
+    return statement, payload, ""
 
 
 def _render_verify_markdown(result: dict, bundle: dict,
@@ -1694,6 +1747,47 @@ def _render_verify_markdown(result: dict, bundle: dict,
               f"- Lint errors: {md_cell(ev.get('lint_errors', 'n/a'))}",
               f"- Requirement coverage: "
               f"{md_cell(ev.get('requirement_coverage', 'n/a'))}"]
+
+    att_info = result.get("attestation")
+    att_info = att_info if isinstance(att_info, dict) else {}
+    if att_info.get("present"):
+        # Everything here is bundle-controlled and goes through md_cell —
+        # approver emails and notes land in PR comments.
+        lines += ["", "### Attestation", ""]
+        lines.append(f"- Predicate type: {md_cell(att_info.get('predicate_type'))}")
+        builder = att_info.get("builder")
+        builder = builder if isinstance(builder, dict) else {}
+        if isinstance(builder.get("id"), str):
+            lines.append(f"- Builder id: {md_cell(builder['id'])}")
+        model_obj = builder.get("model")
+        if isinstance(model_obj, dict):
+            lines.append(f"- Model (self-reported): "
+                         f"{md_cell(model_obj.get('id', ''))}")
+        plugin_obj = builder.get("plugin")
+        if isinstance(plugin_obj, dict):
+            lines.append(f"- Plugin version: "
+                         f"{md_cell(plugin_obj.get('version', ''))}")
+        lines.append(f"- Subjects: {md_cell(att_info.get('subject_count'))}")
+        lines.append(f"- Key id (verifier-derived): "
+                     f"{md_cell(att_info.get('key_id'))}")
+        approvals = att_info.get("approvals")
+        if isinstance(approvals, list) and approvals:
+            lines += ["", "**Approvals (agent-recorded — the AI asserts the "
+                          "human approved; not cryptographic proof of "
+                          "consent):**", ""]
+            for a in approvals:
+                if isinstance(a, dict):
+                    lines.append(f"- {md_cell(a.get('gate', ''))}: "
+                                 f"{md_cell(a.get('decision', ''))} — "
+                                 f"{md_cell(a.get('approver', '') or '(unknown)')} "
+                                 f"({md_cell(a.get('note', '') or 'no note')})")
+        issue_no = md_cell(binfo.get("issue"))
+        lines += ["", "Reproduce this check without ForgeProof (cosign):", "",
+                  "```",
+                  f"cosign verify-blob-attestation --key .forgeproof/issue-{issue_no}.pub.pem \\",
+                  f"  --bundle .forgeproof/issue-{issue_no}.sigstore.json \\",
+                  "  --type slsaprovenance1 --insecure-ignore-tlog <artifact-path>",
+                  "```"]
 
     lines += ["", "---",
               f"Strict mode: {'on' if result['strict'] else 'off'} · "
@@ -1971,6 +2065,159 @@ def cmd_verify(args: argparse.Namespace) -> None:
         check("coverage", "ok",
               f"requirement coverage {eval_info.get('requirement_coverage', 'n/a')}")
 
+    # 8. Attestation checks (v1.3, additive). An ABSENT attestation is
+    # silent: skipped status, zero errors, zero warnings, in every mode
+    # including --strict — no version implies its presence. And verify never
+    # touches the filesystem for attestation purposes: the embedded copy is
+    # inside root_digest; the sidecar is the one file no signature covers.
+    # These are INVARIANT checks over the signed payload, never a byte
+    # re-derivation of the statement (a future predicate change must not turn
+    # valid old bundles red).
+    attestation_summary: dict[str, Any] = {
+        "present": False, "predicate_type": None, "subject_count": None,
+        "key_id": None, "builder": None, "approvals": []}
+    if "attestation" not in bundle:
+        check("attestation", "skipped", "no attestation in bundle (pre-v1.3 format)")
+        check("attestation_signature", "skipped", "no attestation in bundle")
+        check("attestation_subjects", "skipped", "no attestation in bundle")
+    else:
+        attestation_summary["present"] = True
+        statement, att_payload, att_problem = _attestation_statement(
+            bundle["attestation"])
+        if att_problem:
+            # Root digest intact + malformed attestation = it was SIGNED
+            # malformed (an engine bug or hand-built statement), not altered
+            # afterwards — a plain error that matches no tamper marker.
+            errors.append(f"Attestation malformed: {att_problem}")
+            check("attestation", "fail", f"Attestation malformed: {att_problem}")
+            check("attestation_signature", "skipped",
+                  "not evaluated (attestation malformed)")
+            check("attestation_subjects", "skipped",
+                  "not evaluated (attestation malformed)")
+        else:
+            subject_list = statement["subject"]
+            predicate = statement.get("predicate")
+            predicate = predicate if isinstance(predicate, dict) else {}
+            build_def = predicate.get("buildDefinition")
+            build_def = build_def if isinstance(build_def, dict) else {}
+            run_details = predicate.get("runDetails")
+            run_details = run_details if isinstance(run_details, dict) else {}
+            internal = build_def.get("internalParameters")
+            internal = internal if isinstance(internal, dict) else {}
+            external = build_def.get("externalParameters")
+            external = external if isinstance(external, dict) else {}
+
+            attestation_summary["predicate_type"] = statement["predicateType"]
+            attestation_summary["subject_count"] = len(subject_list)
+            approvals_val = external.get("approvals")
+            attestation_summary["approvals"] = (
+                approvals_val if isinstance(approvals_val, list) else [])
+            builder_summary: dict[str, Any] = {}
+            rd_builder = run_details.get("builder")
+            if isinstance(rd_builder, dict) and isinstance(rd_builder.get("id"), str):
+                builder_summary["id"] = rd_builder["id"]
+            internal_builder = internal.get("builder")
+            if isinstance(internal_builder, dict):
+                builder_summary.update(internal_builder)
+            attestation_summary["builder"] = builder_summary or None
+            check("attestation", "ok",
+                  f"in-toto statement, {len(subject_list)} subject(s)")
+
+            # 9. DSSE signature, verified against the bundle's OWN
+            # ssh-ed25519 key — never against key material carried inside the
+            # attestation, which would prove nothing. This binding is the
+            # payoff of signing both tiers with one key.
+            dsse_key = None
+            if isinstance(public_key, str):
+                try:
+                    dsse_key = ssh_ed25519_pubkey_bytes(public_key)
+                except ValueError:
+                    dsse_key = None
+            if dsse_key is None:
+                errors.append("Attestation key mismatch: bundle public_key is "
+                              "not a parseable ssh-ed25519 key")
+                check("attestation_signature", "fail",
+                      "bundle public_key is not a parseable ssh-ed25519 key")
+            else:
+                attestation_summary["key_id"] = base64.b64encode(
+                    hashlib.sha256(ED25519_SPKI_PREFIX + dsse_key).digest()
+                ).decode("ascii")
+                env = bundle["attestation"]["dsseEnvelope"]
+                try:
+                    dsse_sig = base64.b64decode(
+                        env["signatures"][0]["sig"].encode("ascii"),
+                        validate=True)
+                except (ValueError, UnicodeEncodeError):
+                    dsse_sig = b""
+                pae = dsse_pae(env["payloadType"], att_payload)
+                if ed25519_verify(dsse_key, pae, dsse_sig):
+                    check("attestation_signature", "ok",
+                          "DSSE signature valid under the bundle's own key")
+                else:
+                    errors.append(
+                        "Attestation signature invalid: DSSE signature does "
+                        "not verify under the bundle's key")
+                    check("attestation_signature", "fail",
+                          "DSSE signature does not verify under the bundle's key")
+
+            # 10. Subjects equal the bundle's artifact set exactly (or the
+            # single chain descriptor for a zero-artifact bundle), and the
+            # chain byproduct digest equals the SEALED chain_hash — compared,
+            # never recomputed (LF-normalization, finding 8).
+            subj_problem = ""
+            actual_subjects = set()
+            for s in subject_list:
+                if (not isinstance(s, dict)
+                        or not isinstance(s.get("name"), str)
+                        or not isinstance(s.get("digest"), dict)
+                        or not isinstance(s["digest"].get("sha256"), str)):
+                    subj_problem = "subject entry malformed"
+                    break
+                actual_subjects.add((s["name"], s["digest"]["sha256"]))
+            bundle_artifacts = bundle.get("artifacts")
+            expected_subjects = set()
+            if isinstance(bundle_artifacts, list) and bundle_artifacts:
+                for a in bundle_artifacts:
+                    if isinstance(a, dict):
+                        expected_subjects.add(
+                            (str(a.get("path", "")), str(a.get("sha256", ""))))
+            else:
+                expected_subjects.add(
+                    (f".forgeproof/chain-{issue_num}.json",
+                     str(bundle.get("chain_hash", ""))))
+            chain_byproduct = None
+            byproducts = run_details.get("byproducts")
+            for b in (byproducts if isinstance(byproducts, list) else []):
+                if (isinstance(b, dict)
+                        and b.get("name") == f".forgeproof/chain-{issue_num}.json"):
+                    chain_byproduct = b
+                    break
+            if subj_problem:
+                errors.append(f"Attestation malformed: {subj_problem}")
+                check("attestation_subjects", "fail",
+                      f"Attestation malformed: {subj_problem}")
+            elif actual_subjects != expected_subjects:
+                errors.append(
+                    "Attestation subjects do not match the bundle's artifacts")
+                check("attestation_subjects", "fail",
+                      "subject set does not equal the bundle's artifact set")
+            elif (not isinstance(chain_byproduct, dict)
+                    or not isinstance(chain_byproduct.get("digest"), dict)
+                    or not isinstance(chain_byproduct["digest"].get("sha256"), str)):
+                errors.append(
+                    "Attestation malformed: chain byproduct descriptor missing")
+                check("attestation_subjects", "fail",
+                      "chain byproduct descriptor missing")
+            elif chain_byproduct["digest"]["sha256"] != bundle.get("chain_hash"):
+                errors.append(
+                    "Attestation chain digest does not match the sealed chain_hash")
+                check("attestation_subjects", "fail",
+                      "chain byproduct digest does not match the sealed chain_hash")
+            else:
+                check("attestation_subjects", "ok",
+                      f"{len(actual_subjects)} subject(s) match the bundle; "
+                      "chain byproduct matches the sealed chain_hash")
+
     # Bundle summary (recorded claims + chain metadata when available)
     commit_sha = None
     first_timestamp = last_timestamp = None
@@ -2016,6 +2263,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
         "complete": complete,
         "checks": checks,
         "bundle": bundle_summary,
+        "attestation": attestation_summary,
     }
     if out_format == "markdown":
         print(_render_verify_markdown(result, bundle, chain_blocks, artifact_rows))

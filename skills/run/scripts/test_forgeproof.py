@@ -2050,6 +2050,35 @@ class TestV101Compat:
                    for e in strict_output["errors"])
         assert strict_output["complete"] is False
 
+    def test_attestation_skipped_silent_and_format_names_bundle_version(
+            self, tmp_path, monkeypatch, capsys):
+        """v1.3 forever-contract additions: an absent attestation is SILENT —
+        all three attestation checks skipped, zero errors, zero warnings — in
+        lenient AND strict mode, and the format check's detail names the
+        BUNDLE's version, never the verifier's. Shared across all three frozen
+        fixture classes via method aliasing."""
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        for strict in (False, True):
+            args = MagicMock()
+            args.rpack = str(rpack)
+            args.strict = strict
+            with pytest.raises(SystemExit) as exc_info:
+                fp.cmd_verify(args)
+            code = exc_info.value.code
+            output = json.loads(capsys.readouterr().out)
+            assert (0 if code is None else code) == 0
+            assert output["errors"] == []
+            assert output["warnings"] == []
+            statuses = {c["name"]: c["status"] for c in output["checks"]}
+            assert statuses["attestation"] == "skipped"
+            assert statuses["attestation_signature"] == "skipped"
+            assert statuses["attestation_subjects"] == "skipped"
+            fmt = [c for c in output["checks"] if c["name"] == "format"][0]
+            assert fmt["status"] == "ok"
+            assert "1.0.0" in fmt["detail"]
+
 
 # ---------------------------------------------------------------------------
 # v1.1.0 compatibility (forever contract — ROADMAP Principle 1)
@@ -2067,6 +2096,9 @@ class TestV110Compat:
     # verbatim so both forever contracts stay behaviourally identical.
     _require_sshkeygen = TestV101Compat._require_sshkeygen
     _verify = TestV101Compat._verify
+    test_attestation_skipped_silent_and_format_names_bundle_version = (
+        TestV101Compat
+        .test_attestation_skipped_silent_and_format_names_bundle_version)
 
     def _deploy(self, tmp_path):
         """Lay the fixture out the way a real checkout looks: chain and bundle
@@ -2227,6 +2259,9 @@ class TestV122Compat:
     # verbatim so all forever contracts stay behaviourally identical.
     _require_sshkeygen = TestV101Compat._require_sshkeygen
     _verify = TestV101Compat._verify
+    test_attestation_skipped_silent_and_format_names_bundle_version = (
+        TestV101Compat
+        .test_attestation_skipped_silent_and_format_names_bundle_version)
 
     def _deploy(self, tmp_path):
         """Lay the fixture out the way a real checkout looks: chain and bundle
@@ -2797,7 +2832,8 @@ class TestVerifyContract:
         assert output["complete"] is True
         assert [c["name"] for c in output["checks"]] == [
             "format", "root_digest", "signature", "chain_hash",
-            "chain_linkage", "artifacts", "coverage"]
+            "chain_linkage", "artifacts", "coverage",
+            "attestation", "attestation_signature", "attestation_subjects"]
         for c in output["checks"]:
             assert c["status"] in ("ok", "fail", "warn", "skipped")
             assert isinstance(c["detail"], str)
@@ -2809,6 +2845,17 @@ class TestVerifyContract:
         assert statuses["chain_linkage"] == "ok"
         assert statuses["artifacts"] == "ok"
         assert statuses["coverage"] == "ok"
+        # v1.3: absent attestation is SILENT — skipped, no errors, no warnings.
+        assert statuses["attestation"] == "skipped"
+        assert statuses["attestation_signature"] == "skipped"
+        assert statuses["attestation_subjects"] == "skipped"
+        assert output["warnings"] == []
+        # New result keys stay strictly after the frozen seven + v1.2.0 set.
+        assert list(output)[7:] == ["anchor", "strict", "complete", "checks",
+                                    "bundle", "attestation"]
+        assert output["attestation"] == {
+            "present": False, "predicate_type": None, "subject_count": None,
+            "key_id": None, "builder": None, "approvals": []}
         b = output["bundle"]
         assert set(b) == {"issue", "title", "root_digest", "public_key",
                           "chain_length", "first_timestamp", "last_timestamp",
@@ -4048,3 +4095,357 @@ class TestVersionAndFormat:
         assert "9.9.9" in output["warnings"][0]
         fmt = [c for c in output["checks"] if c["name"] == "format"][0]
         assert fmt["status"] == "warn"
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 Phase 3 — verification of the attestation
+# ---------------------------------------------------------------------------
+
+
+def _attested_deploy(tmp_path, issue="1", approvals=None, builder=None):
+    """An attested, validly-signed v1.1.0 bundle deployed like a real
+    checkout. The DSSE tier signs with the SAME key as the SSHSIG tier — the
+    shared test keypair's seed is parsed with the engine's own parser — so
+    the key-binding check has a true-positive baseline."""
+    proj = tmp_path / "proj"
+    rpack = _deploy_v12_project(proj, issue=issue)
+    bundle = json.loads(rpack.read_text(encoding="utf-8"))
+    priv, _pub_text = _test_signing_key()
+    signer = fp.EphemeralEd25519Signer(fp.openssh_ed25519_seed(priv))
+    chain = json.loads((proj / ".forgeproof" / f"chain-{issue}.json")
+                       .read_text(encoding="utf-8"))
+    if builder is not None:
+        # Inject a builder identity into the statement's view of the finalize
+        # block (the chain FILE is untouched, so chain_hash stays green).
+        chain = [dict(b) for b in chain]
+        chain[-1] = dict(chain[-1], data=dict(chain[-1]["data"],
+                                              builder=builder))
+    core = {k: v for k, v in bundle.items()
+            if k not in ("root_digest", "signature", "attestation")}
+    statement = fp.build_intoto_statement(core, chain, approvals or [], "")
+    bundle["attestation"] = fp.build_attestation(statement, signer)
+    _sign_bundle(bundle)
+    rpack.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+    return proj, rpack
+
+
+def _retamper_attested(rpack, mutate_statement=None, resign_dsse=True,
+                       signer_seed=None, mutate_bundle=None):
+    """Tamper helper: optionally mutate the decoded statement and/or the
+    bundle, optionally re-sign the DSSE tier, then ALWAYS re-sign the SSHSIG
+    tier so root_digest stays green — isolating the attestation checks from
+    the root-digest check."""
+    bundle = json.loads(rpack.read_text(encoding="utf-8"))
+    if mutate_statement is not None:
+        env = bundle["attestation"]["dsseEnvelope"]
+        statement = json.loads(base64.b64decode(env["payload"]))
+        mutate_statement(statement)
+        if resign_dsse:
+            if signer_seed is None:
+                priv, _ = _test_signing_key()
+                signer_seed = fp.openssh_ed25519_seed(priv)
+            bundle["attestation"] = fp.build_attestation(
+                statement, fp.EphemeralEd25519Signer(signer_seed))
+        else:
+            env["payload"] = base64.b64encode(
+                fp.canonical_json(statement).encode("utf-8")).decode("ascii")
+    elif signer_seed is not None:
+        # Re-sign the UNCHANGED statement with a foreign key.
+        env = bundle["attestation"]["dsseEnvelope"]
+        statement = json.loads(base64.b64decode(env["payload"]))
+        bundle["attestation"] = fp.build_attestation(
+            statement, fp.EphemeralEd25519Signer(signer_seed))
+    if mutate_bundle is not None:
+        mutate_bundle(bundle)
+    _sign_bundle(bundle)
+    rpack.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+    return bundle
+
+
+class TestVerifyAttestation:
+    """The three additive checks: silent when absent, tamper-class on any
+    broken invariant, plain FAILED on signed-malformed input."""
+
+    NEW_MARKERS = ("Attestation signature invalid", "Attestation key mismatch",
+                   "Attestation subjects", "Attestation chain digest")
+
+    def _marker_hits(self, err):
+        return sum(marker in err for marker in fp.TAMPER_ERROR_MARKERS)
+
+    def _attestation_errors(self, output):
+        return [e for e in output["errors"] if e.startswith("Attestation")]
+
+    def test_attested_bundle_green_all_checks_ok(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = _attested_deploy(tmp_path)
+        monkeypatch.chdir(proj)
+        for strict in (False, True):
+            argv = ["--rpack", str(rpack)] + (["--strict"] if strict else [])
+            code, out = _run_verify(argv, capsys)
+            output = json.loads(out)
+            assert code == 0
+            assert output["errors"] == []
+            assert output["warnings"] == []
+            statuses = {c["name"]: c["status"] for c in output["checks"]}
+            assert statuses["attestation"] == "ok"
+            assert statuses["attestation_signature"] == "ok"
+            assert statuses["attestation_subjects"] == "ok"
+        att = output["attestation"]
+        assert att["present"] is True
+        assert att["predicate_type"] == "https://slsa.dev/provenance/v1"
+        assert att["subject_count"] == 1
+        assert isinstance(att["key_id"], str) and att["key_id"]
+
+    def test_no_attestation_is_silent_in_every_mode(
+            self, tmp_path, monkeypatch, capsys):
+        proj = tmp_path / "proj"
+        rpack = _deploy_v12_project(proj)
+        monkeypatch.chdir(proj)
+        for strict in (False, True):
+            argv = ["--rpack", str(rpack)] + (["--strict"] if strict else [])
+            code, out = _run_verify(argv, capsys)
+            output = json.loads(out)
+            assert code == 0
+            assert output["errors"] == []
+            assert output["warnings"] == []
+            statuses = {c["name"]: c["status"] for c in output["checks"]}
+            assert statuses["attestation"] == "skipped"
+            assert statuses["attestation_signature"] == "skipped"
+            assert statuses["attestation_subjects"] == "skipped"
+        assert output["attestation"] == {
+            "present": False, "predicate_type": None, "subject_count": None,
+            "key_id": None, "builder": None, "approvals": []}
+
+    # -- tamper matrix: each invariant broken individually ------------------
+
+    def _assert_tamper(self, output, code, failing_check):
+        assert code == 1
+        errs = self._attestation_errors(output)
+        assert len(errs) == 1
+        assert self._marker_hits(errs[0]) == 1  # exactly one marker matches
+        statuses = {c["name"]: c["status"] for c in output["checks"]}
+        assert statuses[failing_check] == "fail"
+        assert statuses["root_digest"] == "ok"  # isolation: tamper re-signed
+
+    def test_payload_edit_without_resign_is_tamper(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = _attested_deploy(tmp_path)
+        _retamper_attested(
+            rpack, resign_dsse=False,
+            mutate_statement=lambda s: s["predicate"].update(evil=True))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        self._assert_tamper(output, code, "attestation_signature")
+        assert "Attestation signature invalid" in output["errors"][0]
+        # And the markdown verdict calls it tampering.
+        code_md, out_md = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert code_md == 1
+        assert "TAMPER DETECTED" in out_md
+
+    def test_signature_byte_flip_is_tamper(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = _attested_deploy(tmp_path)
+
+        def flip_sig(bundle):
+            env = bundle["attestation"]["dsseEnvelope"]
+            sig = bytearray(base64.b64decode(env["signatures"][0]["sig"]))
+            sig[0] ^= 0x01
+            env["signatures"][0]["sig"] = base64.b64encode(
+                bytes(sig)).decode("ascii")
+
+        _retamper_attested(rpack, mutate_bundle=flip_sig)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_tamper(json.loads(out), code, "attestation_signature")
+
+    def test_foreign_dsse_key_is_tamper(self, tmp_path, monkeypatch, capsys):
+        # A DSSE tier re-signed with a DIFFERENT key than the bundle's own
+        # ssh-ed25519 key must fail: the key binding is the payoff of the
+        # one-key design.
+        proj, rpack = _attested_deploy(tmp_path)
+        _retamper_attested(rpack, signer_seed=b"\x01" * 32)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        self._assert_tamper(output, code, "attestation_signature")
+        assert "Attestation signature invalid" in output["errors"][0]
+
+    def test_subject_digest_edit_is_tamper(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = _attested_deploy(tmp_path)
+
+        def edit_subject(statement):
+            statement["subject"][0]["digest"]["sha256"] = "0" * 64
+
+        _retamper_attested(rpack, mutate_statement=edit_subject)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        self._assert_tamper(output, code, "attestation_subjects")
+        assert "Attestation subjects" in output["errors"][0]
+        code_md, out_md = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert "TAMPER DETECTED" in out_md
+
+    def test_chain_byproduct_edit_is_tamper(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = _attested_deploy(tmp_path)
+
+        def edit_byproduct(statement):
+            for b in statement["predicate"]["runDetails"]["byproducts"]:
+                if b["name"].startswith(".forgeproof/chain-"):
+                    b["digest"]["sha256"] = "f" * 64
+
+        _retamper_attested(rpack, mutate_statement=edit_byproduct)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        self._assert_tamper(output, code, "attestation_subjects")
+        assert "Attestation chain digest" in output["errors"][0]
+
+    # -- malformed matrix: root digest intact => FAILED, never TAMPER --------
+
+    def _assert_malformed(self, output, code):
+        assert code == 1
+        errs = self._attestation_errors(output)
+        assert len(errs) == 1
+        assert errs[0].startswith("Attestation malformed")
+        assert self._marker_hits(errs[0]) == 0  # matches NO tamper marker
+        statuses = {c["name"]: c["status"] for c in output["checks"]}
+        assert statuses["attestation"] == "fail"
+        assert statuses["attestation_signature"] == "skipped"
+        assert statuses["attestation_subjects"] == "skipped"
+
+    def _malform(self, tmp_path, mutate_bundle):
+        proj, rpack = _attested_deploy(tmp_path)
+        _retamper_attested(rpack, mutate_bundle=mutate_bundle)
+        return proj, rpack
+
+    def test_attestation_wrong_type_is_failed_not_tamper(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._malform(
+            tmp_path, lambda b: b.update(attestation="not an object"))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+        code_md, out_md = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert code_md == 1
+        assert "VERIFICATION FAILED" in out_md
+        assert "TAMPER" not in out_md
+
+    def test_payload_not_base64_is_failed(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._malform(
+            tmp_path,
+            lambda b: b["attestation"]["dsseEnvelope"].update(payload="!!!"))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    def test_payload_not_json_is_failed(self, tmp_path, monkeypatch, capsys):
+        garbage = base64.b64encode(b"not json").decode("ascii")
+        proj, rpack = self._malform(
+            tmp_path,
+            lambda b: b["attestation"]["dsseEnvelope"].update(payload=garbage))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    def test_statement_missing_keys_is_failed(
+            self, tmp_path, monkeypatch, capsys):
+        payload = base64.b64encode(
+            fp.canonical_json({"foo": 1}).encode("utf-8")).decode("ascii")
+        proj, rpack = self._malform(
+            tmp_path,
+            lambda b: b["attestation"]["dsseEnvelope"].update(payload=payload))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    def test_subject_wrong_type_is_failed(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = _attested_deploy(tmp_path)
+        _retamper_attested(
+            rpack, resign_dsse=False,
+            mutate_statement=lambda s: s.update(subject="nope"))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    def test_two_signatures_is_failed(self, tmp_path, monkeypatch, capsys):
+        def dup_sig(bundle):
+            sigs = bundle["attestation"]["dsseEnvelope"]["signatures"]
+            sigs.append(dict(sigs[0]))
+        proj, rpack = self._malform(tmp_path, dup_sig)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    def test_deeply_nested_payload_fails_cleanly(
+            self, tmp_path, monkeypatch, capsys):
+        # Real nesting with a shape fallback (per house rule): on builds where
+        # json survives 2000 levels the result is a list, not an object — the
+        # same clean malformed error either way. The forced-condition variant
+        # is the next test.
+        deep = base64.b64encode(
+            ("[" * 2000 + "]" * 2000).encode("ascii")).decode("ascii")
+        proj, rpack = self._malform(
+            tmp_path,
+            lambda b: b["attestation"]["dsseEnvelope"].update(payload=deep))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    def test_forced_recursionerror_in_payload_parse_fails_cleanly(
+            self, tmp_path, monkeypatch, capsys):
+        # Force the condition (never assert platform-dependent natural
+        # nesting): RecursionError raised ONLY for the attestation payload
+        # parse — the bundle read itself must keep working.
+        proj, rpack = _attested_deploy(tmp_path)
+        bundle = json.loads(rpack.read_text(encoding="utf-8"))
+        payload_text = base64.b64decode(
+            bundle["attestation"]["dsseEnvelope"]["payload"]).decode("utf-8")
+        real_loads = fp.json.loads
+
+        def loads_forced(s, *a, **k):
+            if isinstance(s, str) and s == payload_text:
+                raise RecursionError("forced")
+            return real_loads(s, *a, **k)
+
+        monkeypatch.setattr(fp.json, "loads", loads_forced)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    # -- report + marker hygiene --------------------------------------------
+
+    def test_markdown_attestation_section(self, tmp_path, monkeypatch, capsys):
+        approvals = [{"gate": "plan", "decision": "approved",
+                      "note": "[evil](x)", "approver": "ryan@example.com"}]
+        builder = {"model": {"id": "claude-fable-5", "source": "self-reported"},
+                   "plugin": {"version": fp.PLUGIN_VERSION,
+                              "source": "engine-constant"}}
+        proj, rpack = _attested_deploy(tmp_path, approvals=approvals,
+                                       builder=builder)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert code == 0
+        assert "### Attestation" in out
+        assert "cosign verify-blob-attestation" in out
+        assert "claude-fable-5" in out
+        assert "self-reported" in out
+        assert "agent-recorded" in out
+        # Attacker-controlled note is escaped by md_cell.
+        assert "\\[evil\\]" in out
+        assert "[evil](x)" not in out
+        # The checks table picked up the three new rows automatically.
+        assert "| attestation |" in out
+        assert "| attestation_signature |" in out
+        assert "| attestation_subjects |" in out
+
+    def test_new_tamper_markers_registered_and_clean(self):
+        for marker in self.NEW_MARKERS:
+            assert marker in fp.TAMPER_ERROR_MARKERS
+            # New markers must not collide with the legacy substring traps.
+            assert "hash mismatch" not in marker
+            assert "prev_hash" not in marker
