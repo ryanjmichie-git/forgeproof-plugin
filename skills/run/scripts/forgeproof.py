@@ -22,6 +22,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -137,6 +138,10 @@ def generate_ephemeral_keypair(issue: str) -> tuple[Path, Path]:
     # Remove existing files to avoid ssh-keygen prompt
     private.unlink(missing_ok=True)
     public.unlink(missing_ok=True)
+    # -N "" (no passphrase) is a load-bearing contract, not a convenience:
+    # openssh_ed25519_seed can only parse the unencrypted openssh-key-v1
+    # container, and finalize hard-fails on an unparseable key rather than
+    # emit a bundle without its attestation.
     result = run(["ssh-keygen", "-t", "ed25519", "-f", str(private), "-N", "", "-q"])
     if result.returncode != 0:
         die(f"ssh-keygen failed: {result.stderr.strip()}")
@@ -224,6 +229,320 @@ def delete_private_key(private_path: Path) -> None:
     # Also remove the public key file from /tmp (it's embedded in the bundle)
     pub = Path(f"{private_path}.pub")
     pub.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Raw Ed25519 (RFC 8032) — the cosign-verifiable tier
+#
+# A pure-stdlib RFC 8032 implementation over the SAME ephemeral key that signs
+# the SSHSIG chain/bundle signature: the 32-byte seed is parsed out of the
+# unencrypted openssh-key-v1 file generate_ephemeral_keypair writes. Signing
+# is deterministic per the RFC, which is what makes the attestation sidecar
+# reproducible. Verification is hardened for attacker-supplied input: it
+# returns False rather than raising, and rejects non-canonical encodings —
+# s >= L (the signature-malleability class this repo has patched twice at the
+# SSHSIG tier), y >= p, non-square x, and x = 0 with the sign bit set.
+# Deliberately absent: a small-order-point blocklist. The DSSE key must equal
+# the bundle's own ssh-ed25519 key, which a bundle-forging attacker controls
+# outright — they would use a well-formed key they own, so a blocklist has no
+# detection power in this trust model; the anchor is the committed bundle.
+# ---------------------------------------------------------------------------
+
+_ED25519_P = 2**255 - 19
+_ED25519_L = 2**252 + 27742317777372353535851937790883648493
+_ED25519_D = (-121665 * pow(121666, _ED25519_P - 2, _ED25519_P)) % _ED25519_P
+_ED25519_SQRT_M1 = pow(2, (_ED25519_P - 1) // 4, _ED25519_P)
+
+
+def _ed25519_decode_point(encoded: bytes) -> tuple[int, int]:
+    """Decode a 32-byte point encoding, canonically (RFC 8032 5.1.3).
+    Raises ValueError on any invalid or non-canonical encoding."""
+    if len(encoded) != 32:
+        raise ValueError("point encoding must be 32 bytes")
+    p = _ED25519_P
+    val = int.from_bytes(encoded, "little")
+    sign = val >> 255
+    y = val & ((1 << 255) - 1)
+    if y >= p:
+        raise ValueError("non-canonical point encoding (y >= p)")
+    xx = (y * y - 1) * pow(_ED25519_D * y * y + 1, p - 2, p) % p
+    x = pow(xx, (p + 3) // 8, p)
+    if (x * x - xx) % p:
+        x = x * _ED25519_SQRT_M1 % p
+    if (x * x - xx) % p:
+        raise ValueError("invalid point encoding (x is not a square)")
+    if x == 0 and sign:
+        raise ValueError("invalid point encoding (x = 0 with sign bit set)")
+    if x & 1 != sign:
+        x = p - x
+    return (x, y)
+
+
+def _ed25519_encode_point(point: tuple[int, int]) -> bytes:
+    x, y = point
+    return (y | ((x & 1) << 255)).to_bytes(32, "little")
+
+
+def _ed25519_add(a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
+    """Affine twisted-Edwards addition (the formula is complete for Ed25519,
+    so it also serves as doubling)."""
+    p = _ED25519_P
+    x1, y1 = a
+    x2, y2 = b
+    dxy = _ED25519_D * x1 * x2 * y1 * y2 % p
+    x3 = (x1 * y2 + x2 * y1) * pow(1 + dxy, p - 2, p)
+    y3 = (y1 * y2 + x1 * x2) * pow(1 - dxy, p - 2, p)
+    return (x3 % p, y3 % p)
+
+
+def _ed25519_scalarmult(point: tuple[int, int], e: int) -> tuple[int, int]:
+    result = (0, 1)  # neutral element
+    while e:
+        if e & 1:
+            result = _ed25519_add(result, point)
+        point = _ed25519_add(point, point)
+        e >>= 1
+    return result
+
+
+# Base point B: y = 4/5, x even (decoded from its canonical encoding so the
+# same validated path defines it).
+_ED25519_B = _ed25519_decode_point(
+    ((4 * pow(5, _ED25519_P - 2, _ED25519_P)) % _ED25519_P).to_bytes(32, "little"))
+
+
+def _ed25519_secret_scalar(seed: bytes) -> tuple[int, bytes]:
+    """(clamped scalar, prefix) from a 32-byte seed (RFC 8032 5.1.5)."""
+    if len(seed) != 32:
+        raise ValueError("Ed25519 seed must be 32 bytes")
+    h = hashlib.sha512(bytes(seed)).digest()
+    a = int.from_bytes(h[:32], "little")
+    a &= (1 << 254) - 8
+    a |= 1 << 254
+    return a, h[32:]
+
+
+def ed25519_public_from_seed(seed: bytes) -> bytes:
+    """Derive the 32-byte public key from a 32-byte seed."""
+    a, _ = _ed25519_secret_scalar(seed)
+    return _ed25519_encode_point(_ed25519_scalarmult(_ED25519_B, a))
+
+
+def ed25519_sign(seed: bytes, message: bytes) -> bytes:
+    """Deterministic RFC 8032 Ed25519 signature: 64 bytes, R || s. Plain
+    Ed25519 — NOT Ed25519ph — which is the variant the pinned cosign binaries
+    verify (spike-proven; see PLAN_v1.3.0.md Phase 0)."""
+    a, prefix = _ed25519_secret_scalar(seed)
+    public = _ed25519_encode_point(_ed25519_scalarmult(_ED25519_B, a))
+    r = int.from_bytes(
+        hashlib.sha512(prefix + bytes(message)).digest(), "little") % _ED25519_L
+    r_enc = _ed25519_encode_point(_ed25519_scalarmult(_ED25519_B, r))
+    k = int.from_bytes(
+        hashlib.sha512(r_enc + public + bytes(message)).digest(),
+        "little") % _ED25519_L
+    s = (r + k * a) % _ED25519_L
+    return r_enc + s.to_bytes(32, "little")
+
+
+def ed25519_verify(public: bytes, message: bytes, signature: bytes) -> bool:
+    """Verify an RFC 8032 Ed25519 signature over hostile input: returns False
+    on any malformed or non-canonical value, never raises."""
+    if len(public) != 32 or len(signature) != 64:
+        return False
+    try:
+        point_a = _ed25519_decode_point(bytes(public))
+        point_r = _ed25519_decode_point(bytes(signature[:32]))
+    except ValueError:
+        return False
+    s = int.from_bytes(signature[32:], "little")
+    if s >= _ED25519_L:
+        return False
+    k = int.from_bytes(
+        hashlib.sha512(
+            bytes(signature[:32]) + bytes(public) + bytes(message)).digest(),
+        "little") % _ED25519_L
+    left = _ed25519_scalarmult(_ED25519_B, s)
+    right = _ed25519_add(point_r, _ed25519_scalarmult(point_a, k))
+    return left == right
+
+
+def openssh_ed25519_seed(private_path: Path) -> bytes:
+    """Extract the 32-byte Ed25519 seed from an UNENCRYPTED openssh-key-v1
+    private key file (the kind generate_ephemeral_keypair writes with -N "").
+    Dies with an actionable message on any structural surprise — an encrypted
+    key, a non-ed25519 key, truncation, or an embedded public key that does
+    not match the one derived from the seed (a parse bug must die loudly,
+    never sign with the wrong key)."""
+    label = f"ephemeral private key ({private_path})"
+    try:
+        text = private_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        die(f"cannot read {label}: {e}")
+
+    begin = "-----BEGIN OPENSSH PRIVATE KEY-----"
+    end = "-----END OPENSSH PRIVATE KEY-----"
+    start = text.find(begin)
+    stop = text.find(end)
+    if start < 0 or stop <= start:
+        die(f"{label} is not an OpenSSH private key (missing PEM armor)")
+    try:
+        blob = base64.b64decode(text[start + len(begin):stop].encode("ascii"))
+    except (ValueError, UnicodeEncodeError):
+        die(f"{label} has a corrupt base64 body")
+
+    def _cursor(buf: bytes):
+        state = [0]
+
+        def take(n: int, what: str) -> bytes:
+            if state[0] + n > len(buf):
+                die(f"{label} is truncated or corrupt (while reading {what})")
+            piece = buf[state[0]:state[0] + n]
+            state[0] += n
+            return piece
+
+        def take_str(what: str) -> bytes:
+            n = int.from_bytes(take(4, what + " length"), "big")
+            return take(n, what)
+
+        return take, take_str
+
+    magic = b"openssh-key-v1\x00"
+    if not blob.startswith(magic):
+        die(f"{label} is not an openssh-key-v1 container")
+    take, take_str = _cursor(blob[len(magic):])
+    cipher = take_str("cipher name")
+    kdf = take_str("kdf name")
+    take_str("kdf options")
+    if cipher != b"none" or kdf != b"none":
+        die(f"{label} is encrypted (cipher "
+            f"{cipher.decode(errors='replace')!r}) — ForgeProof ephemeral "
+            "keys are always written without a passphrase")
+    nkeys = int.from_bytes(take(4, "key count"), "big")
+    if nkeys != 1:
+        die(f"{label} contains {nkeys} keys (expected exactly 1)")
+    take_str("public key blob")
+    private_section = take_str("private key section")
+
+    ptake, ptake_str = _cursor(private_section)
+    if ptake(4, "check value") != ptake(4, "check value"):
+        die(f"{label} check values differ — corrupt or encrypted key")
+    keytype = ptake_str("key type")
+    if keytype != b"ssh-ed25519":
+        die(f"{label} is a {keytype.decode(errors='replace')!r} key "
+            "(expected ssh-ed25519)")
+    pub = ptake_str("public key")
+    priv = ptake_str("private key")
+    ptake_str("comment")
+    if len(pub) != 32 or len(priv) != 64 or priv[32:] != pub:
+        die(f"{label} has malformed ed25519 key material")
+    seed = priv[:32]
+    if ed25519_public_from_seed(seed) != pub:
+        die(f"{label}: public key derived from the seed does not match the "
+            "embedded key blob — refusing to sign with a misparsed key")
+    return seed
+
+
+def ssh_ed25519_pubkey_bytes(pub_line: str) -> bytes:
+    """Raw 32-byte key from an OpenSSH public-key line ('ssh-ed25519 <b64>
+    [comment]'). Raises ValueError on malformed input so each caller decides
+    the failure mode (finalize dies; verify turns a check red). Only the first
+    two whitespace-separated fields are read — the comment may itself contain
+    spaces (ssh-keygen defaults it to username@hostname)."""
+    fields = pub_line.split()
+    if len(fields) < 2 or fields[0] != "ssh-ed25519":
+        raise ValueError("not an ssh-ed25519 public key line")
+    try:
+        blob = base64.b64decode(fields[1].encode("ascii"), validate=True)
+    except (ValueError, UnicodeEncodeError) as e:
+        raise ValueError(f"invalid public key base64: {e}")
+    # SSH wire blob: string("ssh-ed25519") + string(32-byte key), exactly.
+    header = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"
+    if not blob.startswith(header) or len(blob) != len(header) + 32:
+        raise ValueError("public key blob is not a raw ssh-ed25519 key")
+    return blob[len(header):]
+
+
+# RFC 8410 section 10.1: DER SubjectPublicKeyInfo header for Ed25519; the
+# 12-byte prefix + 32 raw key bytes = exactly 44 bytes.
+ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
+
+
+def ed25519_spki_pem(public: bytes) -> str:
+    """SubjectPublicKeyInfo PEM for a raw Ed25519 key. The block type must be
+    PUBLIC KEY (sigstore accepts only PUBLIC KEY and RSA PUBLIC KEY); LF line
+    endings; the 44-byte DER fits one base64 line, always starting
+    MCowBQYDK2VwAyEA."""
+    if len(public) != 32:
+        raise ValueError("Ed25519 public key must be 32 bytes")
+    body = base64.b64encode(ED25519_SPKI_PREFIX + bytes(public)).decode("ascii")
+    return f"-----BEGIN PUBLIC KEY-----\n{body}\n-----END PUBLIC KEY-----\n"
+
+
+# ---------------------------------------------------------------------------
+# DSSE envelope + Sigstore bundle encoding (amendment-v2 layout)
+# ---------------------------------------------------------------------------
+
+DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json"
+SIGSTORE_BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
+
+
+def dsse_pae(payload_type: str, payload: bytes) -> bytes:
+    """DSSE Pre-Authentication Encoding: 'DSSEv1' + ASCII decimal lengths,
+    exactly four single spaces, no trailing separator."""
+    ptype = payload_type.encode("utf-8")
+    return b"DSSEv1 %d %s %d %s" % (len(ptype), ptype, len(payload), payload)
+
+
+def build_dsse_envelope(payload: bytes, signer) -> dict:
+    """DSSE envelope over an in-toto payload: standard base64 WITH padding for
+    payload and sig (protojson round-trips those byte-identically, which the
+    sidecar contract needs), exactly ONE signature, and the signature object
+    carries `sig` only — NO keyid (cosign's envelope verifier skips any
+    signature whose non-empty keyid differs from its own derivation)."""
+    sig = signer.sign(dsse_pae(DSSE_PAYLOAD_TYPE, payload))
+    return {
+        "payload": base64.b64encode(payload).decode("ascii"),
+        "payloadType": DSSE_PAYLOAD_TYPE,
+        "signatures": [{"sig": base64.b64encode(sig).decode("ascii")}],
+    }
+
+
+def build_sigstore_bundle(envelope: dict, signer) -> dict:
+    """Sigstore bundle v0.3 wrapper. protojson rejects unknown fields, so the
+    wrapper carries nothing ForgeProof-specific — everything of ours lives
+    inside the in-toto predicate. `dsseEnvelope` is a sibling of
+    `verificationMaterial`, never nested inside it."""
+    return {
+        "mediaType": SIGSTORE_BUNDLE_MEDIA_TYPE,
+        "verificationMaterial": signer.verification_material(),
+        "dsseEnvelope": envelope,
+    }
+
+
+class EphemeralEd25519Signer:
+    """v1.3 attestation signer, and the v1.4 seam: a signer is anything with
+    .public_bytes, .sign(data) -> bytes, and .verification_material() -> dict.
+    The keyless tier (Fulcio cert + Rekor tlogEntries) implements the same
+    three members and swaps only the verification material, leaving the
+    envelope byte-identical.
+
+    verification_material() is the EMPTY public-key identifier (amendment v2):
+    the bundle wrapper carries no key ids at all. The key itself travels in
+    the .rpack public_key field and the .pub.pem sidecar."""
+
+    def __init__(self, seed: bytes):
+        self.seed = seed
+        self.public_bytes = ed25519_public_from_seed(seed)
+
+    @classmethod
+    def from_private_key(cls, private_path: Path) -> "EphemeralEd25519Signer":
+        return cls(openssh_ed25519_seed(private_path))
+
+    def sign(self, data: bytes) -> bytes:
+        return ed25519_sign(self.seed, data)
+
+    def verification_material(self) -> dict:
+        return {"publicKey": {}}
 
 
 # ---------------------------------------------------------------------------

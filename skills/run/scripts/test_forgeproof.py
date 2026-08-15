@@ -3212,3 +3212,362 @@ class TestEndToEnd:
 
 # Need shutil for the integration test
 import shutil
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 Phase 1 — raw Ed25519 (RFC 8032), OpenSSH seed extraction, DSSE and
+# Sigstore-bundle encoding primitives. Pure functions; nothing lifecycle-wired.
+# ---------------------------------------------------------------------------
+
+import base64  # noqa: E402
+import time  # noqa: E402
+
+# RFC 8032 section 7.1 test vectors (TEST 1, 2, 3). The RFC's "SECRET KEY" is
+# the 32-byte seed, so each drops straight into the engine's seed-based API.
+RFC8032_VECTORS = [
+    (
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "",
+        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+        "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+    ),
+    (
+        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "72",
+        "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da"
+        "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+    ),
+    (
+        "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+        "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+        "af82",
+        "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac"
+        "18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a",
+    ),
+]
+
+# Group order L, restated independently of the engine (RFC 8032 section 5.1).
+ED25519_L_INDEPENDENT = 2**252 + 27742317777372353535851937790883648493
+ED25519_P_INDEPENDENT = 2**255 - 19
+
+TEST1_SEED = bytes.fromhex(RFC8032_VECTORS[0][0])
+TEST1_PUB = bytes.fromhex(RFC8032_VECTORS[0][1])
+TEST1_SIG = bytes.fromhex(RFC8032_VECTORS[0][3])
+TEST2_PUB = bytes.fromhex(RFC8032_VECTORS[1][1])
+
+
+class TestEd25519Primitive:
+    """RFC 8032 known-answer vectors plus fixed hostile-encoding vectors."""
+
+    def test_rfc8032_known_answers(self):
+        for seed_hex, pub_hex, msg_hex, sig_hex in RFC8032_VECTORS:
+            seed = bytes.fromhex(seed_hex)
+            msg = bytes.fromhex(msg_hex)
+            assert fp.ed25519_public_from_seed(seed).hex() == pub_hex
+            assert fp.ed25519_sign(seed, msg).hex() == sig_hex
+            assert fp.ed25519_verify(
+                bytes.fromhex(pub_hex), msg, bytes.fromhex(sig_hex)
+            )
+
+    def test_signing_is_deterministic(self):
+        a = fp.ed25519_sign(TEST1_SEED, b"determinism probe")
+        b = fp.ed25519_sign(TEST1_SEED, b"determinism probe")
+        assert a == b
+
+    def test_verify_rejects_wrong_message(self):
+        assert not fp.ed25519_verify(TEST1_PUB, b"x", TEST1_SIG)
+
+    def test_verify_rejects_flipped_signature(self):
+        bad = bytearray(TEST1_SIG)
+        bad[0] ^= 0x01
+        assert not fp.ed25519_verify(TEST1_PUB, b"", bytes(bad))
+
+    def test_verify_rejects_wrong_key(self):
+        assert not fp.ed25519_verify(TEST2_PUB, b"", TEST1_SIG)
+
+    def test_malleability_s_plus_l_rejected(self):
+        # The exact malleability class this repo patched twice at the SSHSIG
+        # tier: s' = s + L verifies under a naive verifier. Must be rejected.
+        r_part = TEST1_SIG[:32]
+        s = int.from_bytes(TEST1_SIG[32:], "little")
+        s_mall = s + ED25519_L_INDEPENDENT
+        mall = r_part + s_mall.to_bytes(32, "little")
+        assert fp.ed25519_verify(TEST1_PUB, b"", TEST1_SIG)  # sanity
+        assert not fp.ed25519_verify(TEST1_PUB, b"", mall)
+
+    def test_truncated_signature_rejected(self):
+        assert not fp.ed25519_verify(TEST1_PUB, b"", TEST1_SIG[:63])
+        assert not fp.ed25519_verify(TEST1_PUB, b"", b"")
+        assert not fp.ed25519_verify(TEST1_PUB, b"", TEST1_SIG + b"\x00")
+
+    def test_wrong_length_public_key_rejected(self):
+        assert not fp.ed25519_verify(TEST1_PUB[:31], b"", TEST1_SIG)
+        assert not fp.ed25519_verify(TEST1_PUB + b"\x00", b"", TEST1_SIG)
+        assert not fp.ed25519_verify(b"", b"", TEST1_SIG)
+
+    def test_noncanonical_y_ge_p_rejected(self):
+        # y = p encoded little-endian: numerically 0 mod p but a non-canonical
+        # encoding. Rejected as the public key AND as the signature's R point.
+        bad_point = ED25519_P_INDEPENDENT.to_bytes(32, "little")
+        assert not fp.ed25519_verify(bad_point, b"", TEST1_SIG)
+        bad_sig = bad_point + TEST1_SIG[32:]
+        assert not fp.ed25519_verify(TEST1_PUB, b"", bad_sig)
+
+    def test_nonsquare_x_rejected(self):
+        # y = 2: (y^2-1)/(d*y^2+1) is a quadratic non-residue mod p, so no x
+        # exists — decoding must fail (computed independently of the engine).
+        bad_point = (2).to_bytes(32, "little")
+        assert not fp.ed25519_verify(bad_point, b"", TEST1_SIG)
+        bad_sig = bad_point + TEST1_SIG[32:]
+        assert not fp.ed25519_verify(TEST1_PUB, b"", bad_sig)
+
+    def test_invalid_sign_bit_x0_rejected(self):
+        # y = 1 decodes to x = 0; RFC 8032 5.1.3: "if x = 0 and x_0 = 1,
+        # decoding fails". Rejected as public key and as R.
+        bad_point = (1 | (1 << 255)).to_bytes(32, "little")
+        assert not fp.ed25519_verify(bad_point, b"", TEST1_SIG)
+        bad_sig = bad_point + TEST1_SIG[32:]
+        assert not fp.ed25519_verify(TEST1_PUB, b"", bad_sig)
+
+    def test_public_from_seed_rejects_bad_length(self):
+        with pytest.raises(ValueError):
+            fp.ed25519_public_from_seed(b"\x00" * 31)
+
+    def test_signing_timing_floor(self):
+        start = time.perf_counter()
+        fp.ed25519_sign(TEST1_SEED, b"x" * 100_000)
+        assert time.perf_counter() - start < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Hand-built openssh-key-v1 containers, written from the format spec
+# independently of the engine parser (the round-trip doubles as a format
+# cross-check). Layout: magic, cipher, kdf, kdfoptions, nkeys, public blob(s),
+# then the private section (check-int x2, keytype, pub, priv=seed||pub,
+# comment, 1,2,3... padding to the 8-byte "none"-cipher block size).
+# ---------------------------------------------------------------------------
+
+
+def _ssh_str(b: bytes) -> bytes:
+    return len(b).to_bytes(4, "big") + b
+
+
+def _openssh_private_key_text(
+    seed: bytes,
+    pub: bytes,
+    cipher: bytes = b"none",
+    kdf: bytes = b"none",
+    keytype: bytes = b"ssh-ed25519",
+    checkints_match: bool = True,
+    truncate_at: "int | None" = None,
+) -> str:
+    check = b"\x12\x34\x56\x78"
+    check2 = check if checkints_match else b"\x87\x65\x43\x21"
+    private_section = (
+        check
+        + check2
+        + _ssh_str(keytype)
+        + _ssh_str(pub)
+        + _ssh_str(seed + pub)
+        + _ssh_str(b"forgeproof-test@example")
+    )
+    pad = 1
+    private_section = bytearray(private_section)
+    while len(private_section) % 8:
+        private_section.append(pad)
+        pad += 1
+    blob = (
+        b"openssh-key-v1\x00"
+        + _ssh_str(cipher)
+        + _ssh_str(kdf)
+        + _ssh_str(b"")
+        + (1).to_bytes(4, "big")
+        + _ssh_str(_ssh_str(keytype) + _ssh_str(pub))
+        + _ssh_str(bytes(private_section))
+    )
+    if truncate_at is not None:
+        blob = blob[:truncate_at]
+    b64 = base64.b64encode(blob).decode()
+    lines = [b64[i:i + 70] for i in range(0, len(b64), 70)]
+    return (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        + "\n".join(lines)
+        + "\n-----END OPENSSH PRIVATE KEY-----\n"
+    )
+
+
+def _ssh_pub_line(pub: bytes, keytype: bytes = b"ssh-ed25519",
+                  comment: str = "User@PC with spaces") -> str:
+    blob = _ssh_str(keytype) + _ssh_str(pub)
+    return f"ssh-ed25519 {base64.b64encode(blob).decode()} {comment}"
+
+
+class TestOpenSSHKeyParse:
+    """openssh_ed25519_seed + ssh_ed25519_pubkey_bytes: happy path against
+    hand-built containers and a real ssh-keygen key; every structural surprise
+    dies cleanly (no traceback)."""
+
+    def _write(self, tmp_path, text):
+        p = tmp_path / "key"
+        p.write_text(text, encoding="utf-8", newline="\n")
+        return p
+
+    def test_parses_handbuilt_container(self, tmp_path):
+        p = self._write(
+            tmp_path, _openssh_private_key_text(TEST1_SEED, TEST1_PUB))
+        assert fp.openssh_ed25519_seed(p) == TEST1_SEED
+
+    def test_real_sshkeygen_roundtrip(self):
+        _skip_without_sshkeygen()
+        priv, pub = fp.generate_ephemeral_keypair("katparse")
+        try:
+            seed = fp.openssh_ed25519_seed(priv)
+            derived = fp.ed25519_public_from_seed(seed)
+            blob = fp.ssh_ed25519_pubkey_bytes(pub.read_text().strip())
+            assert derived == blob
+            sig = fp.ed25519_sign(seed, b"cross-check")
+            assert fp.ed25519_verify(blob, b"cross-check", sig)
+        finally:
+            fp.delete_private_key(priv)
+
+    def _assert_dies(self, path, capsys, fragment=""):
+        with pytest.raises(SystemExit):
+            fp.openssh_ed25519_seed(path)
+        err = capsys.readouterr().err
+        assert "forgeproof: error:" in err
+        assert "Traceback" not in err
+        if fragment:
+            assert fragment in err
+
+    def test_missing_file_dies(self, tmp_path, capsys):
+        self._assert_dies(tmp_path / "absent", capsys)
+
+    def test_garbage_file_dies(self, tmp_path, capsys):
+        self._assert_dies(self._write(tmp_path, "not a key\n"), capsys)
+
+    def test_truncated_container_dies(self, tmp_path, capsys):
+        text = _openssh_private_key_text(TEST1_SEED, TEST1_PUB, truncate_at=40)
+        self._assert_dies(self._write(tmp_path, text), capsys)
+
+    def test_encrypted_key_dies(self, tmp_path, capsys):
+        text = _openssh_private_key_text(
+            TEST1_SEED, TEST1_PUB, cipher=b"aes256-ctr", kdf=b"bcrypt")
+        self._assert_dies(self._write(tmp_path, text), capsys, "encrypted")
+
+    def test_non_ed25519_key_dies(self, tmp_path, capsys):
+        text = _openssh_private_key_text(
+            TEST1_SEED, TEST1_PUB, keytype=b"ssh-rsa")
+        self._assert_dies(self._write(tmp_path, text), capsys)
+
+    def test_checkint_mismatch_dies(self, tmp_path, capsys):
+        text = _openssh_private_key_text(
+            TEST1_SEED, TEST1_PUB, checkints_match=False)
+        self._assert_dies(self._write(tmp_path, text), capsys)
+
+    def test_derived_pub_mismatch_dies(self, tmp_path, capsys):
+        # Internally consistent container whose embedded public key is NOT the
+        # one derived from the seed — the parse-bug tripwire must die loudly
+        # rather than sign with the wrong key.
+        text = _openssh_private_key_text(TEST1_SEED, TEST2_PUB)
+        self._assert_dies(self._write(tmp_path, text), capsys)
+
+    def test_pub_line_parses_with_spacey_comment(self):
+        line = _ssh_pub_line(TEST1_PUB)
+        assert fp.ssh_ed25519_pubkey_bytes(line) == TEST1_PUB
+
+    def test_pub_line_rejects_non_ed25519(self):
+        line = _ssh_pub_line(TEST1_PUB).replace(
+            "ssh-ed25519 ", "ssh-rsa ", 1)
+        with pytest.raises(ValueError):
+            fp.ssh_ed25519_pubkey_bytes(line)
+
+    def test_pub_line_rejects_bad_base64(self):
+        with pytest.raises(ValueError):
+            fp.ssh_ed25519_pubkey_bytes("ssh-ed25519 !!notbase64!! c")
+
+    def test_pub_line_rejects_wrong_blob_header(self):
+        blob = _ssh_str(b"ssh-rsa") + _ssh_str(TEST1_PUB)
+        line = f"ssh-ed25519 {base64.b64encode(blob).decode()} c"
+        with pytest.raises(ValueError):
+            fp.ssh_ed25519_pubkey_bytes(line)
+
+    def test_pub_line_rejects_wrong_key_length(self):
+        blob = _ssh_str(b"ssh-ed25519") + _ssh_str(TEST1_PUB[:31])
+        line = f"ssh-ed25519 {base64.b64encode(blob).decode()} c"
+        with pytest.raises(ValueError):
+            fp.ssh_ed25519_pubkey_bytes(line)
+
+    def test_pub_line_rejects_empty(self):
+        with pytest.raises(ValueError):
+            fp.ssh_ed25519_pubkey_bytes("")
+
+
+class TestDSSEEncoding:
+    """PAE, SPKI PEM, envelope + Sigstore bundle builders, and the signer seam.
+    Wrapper layout is the amendment-v2 contract: keyid-free signature, empty
+    publicKey identifier."""
+
+    def test_pae_known_answer(self):
+        # Example from the DSSE protocol spec.
+        assert fp.dsse_pae("http://example.com/HelloWorld", b"hello world") == (
+            b"DSSEv1 29 http://example.com/HelloWorld 11 hello world"
+        )
+
+    def test_pae_empty_payload(self):
+        assert fp.dsse_pae("t", b"") == b"DSSEv1 1 t 0 "
+
+    def test_spki_pem_golden(self):
+        pem = fp.ed25519_spki_pem(TEST1_PUB)
+        assert pem == (
+            "-----BEGIN PUBLIC KEY-----\n"
+            "MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n"
+            "-----END PUBLIC KEY-----\n"
+        )
+
+    def test_spki_pem_body_prefix_invariant(self):
+        # Every Ed25519 SPKI body starts with the DER prefix's base64 form.
+        body = fp.ed25519_spki_pem(TEST2_PUB).splitlines()[1]
+        assert body.startswith("MCowBQYDK2VwAyEA")
+
+    def _signer(self):
+        return fp.EphemeralEd25519Signer(TEST1_SEED)
+
+    def test_signer_seam_members(self):
+        signer = self._signer()
+        assert signer.public_bytes == TEST1_PUB
+        assert signer.verification_material() == {"publicKey": {}}
+        assert signer.sign(b"m") == fp.ed25519_sign(TEST1_SEED, b"m")
+
+    def test_envelope_shape_and_signature(self):
+        signer = self._signer()
+        payload = json.dumps({"probe": 1}).encode()
+        env = fp.build_dsse_envelope(payload, signer)
+        assert set(env.keys()) == {"payload", "payloadType", "signatures"}
+        assert env["payloadType"] == "application/vnd.in-toto+json"
+        assert len(env["signatures"]) == 1
+        # Amendment v2: the signature object carries sig ONLY — no keyid.
+        assert set(env["signatures"][0].keys()) == {"sig"}
+        # Standard base64 WITH padding, byte-identical on round-trip.
+        for value in (env["payload"], env["signatures"][0]["sig"]):
+            assert base64.b64encode(base64.b64decode(value)).decode() == value
+        assert base64.b64decode(env["payload"]) == payload
+        pae = fp.dsse_pae(env["payloadType"], payload)
+        assert fp.ed25519_verify(
+            signer.public_bytes, pae,
+            base64.b64decode(env["signatures"][0]["sig"]))
+
+    def test_bundle_shape(self):
+        signer = self._signer()
+        env = fp.build_dsse_envelope(b"{}", signer)
+        bundle = fp.build_sigstore_bundle(env, signer)
+        # protojson rejects unknown fields: nothing ForgeProof-specific in the
+        # wrapper, dsseEnvelope a SIBLING of verificationMaterial.
+        assert set(bundle.keys()) == {
+            "mediaType", "verificationMaterial", "dsseEnvelope"}
+        assert bundle["mediaType"] == (
+            "application/vnd.dev.sigstore.bundle.v0.3+json")
+        # Amendment v2: empty publicKey identifier — no hint, no keyid anywhere.
+        assert bundle["verificationMaterial"] == {"publicKey": {}}
+        assert bundle["dsseEnvelope"] is env
