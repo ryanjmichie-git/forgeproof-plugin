@@ -1,0 +1,89 @@
+[
+  {
+    "index": 0,
+    "timestamp": "2026-08-21T04:32:11.082194+00:00",
+    "action": "genesis",
+    "data": {
+      "issue": 996,
+      "title": "v1.3.0 attestation fixture",
+      "requirements": [
+        "REQ-1: bundle embeds a cosign-verifiable in-toto attestation"
+      ]
+    },
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "hash": "278e3be0daf637ac7e55992b10122e906d9ebcf0441d3affb0ff8594ec302183",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAguXEtuAips/eFvINUWJV3NpqKmx\n/+aWK5ussH/ZkCZKoAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEAzPE9dxdRoKxHSEDkXe1oobNwXzCIKdIH8lsCSdXT9KDsfWL77PPrThE\nGQT2kkoIDKouidLsM61D286yhrKGsO\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 1,
+    "timestamp": "2026-08-21T04:32:11.184886+00:00",
+    "action": "file-edit",
+    "data": {
+      "path": "src/example4.py",
+      "operation": "create",
+      "sha256": "60b1e438f6e569f7629f418e9a261a3fe2f61a7781ba4ae058cd4581eddfd68a"
+    },
+    "prev_hash": "278e3be0daf637ac7e55992b10122e906d9ebcf0441d3affb0ff8594ec302183",
+    "hash": "69ef4281fd871925b721454dcd2b4d3bf3d0fda204074771ed0b56f617722d94",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAguXEtuAips/eFvINUWJV3NpqKmx\n/+aWK5ussH/ZkCZKoAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEBX2zagWJ/x+yR6ec+nJqJHdOV5ugKTeF9YG/DwrB4hdnXuAO04E3pKaj\nqi7QxSqPsizO/tH4Wqk9TDnEy1u3sE\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 2,
+    "timestamp": "2026-08-21T04:32:11.289300+00:00",
+    "action": "test-result",
+    "data": {
+      "suite": "pytest",
+      "passed": 1,
+      "failed": 0,
+      "coverage": {
+        "REQ-1": [
+          "test_attestation_fixture"
+        ]
+      },
+      "failed_tests": []
+    },
+    "prev_hash": "69ef4281fd871925b721454dcd2b4d3bf3d0fda204074771ed0b56f617722d94",
+    "hash": "0385672642e90c440b52a1ffc3241bc2610c536299069f2f35ec6d01db16bd4c",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAguXEtuAips/eFvINUWJV3NpqKmx\n/+aWK5ussH/ZkCZKoAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEBP/hER7IIBzIe7Andp4YeMQAb8MpGs0CbZrBn/rmj9enEA3RkR52ZDBo\n5mHIyxvXWXViEfOVd2F9yGaBf4+3UA\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 3,
+    "timestamp": "2026-08-21T04:32:11.401815+00:00",
+    "action": "approval",
+    "data": {
+      "gate": "plan",
+      "decision": "approved",
+      "note": "frozen fixture for forgeproof-verify CI",
+      "approver": "fixture-approver@example.com"
+    },
+    "prev_hash": "0385672642e90c440b52a1ffc3241bc2610c536299069f2f35ec6d01db16bd4c",
+    "hash": "9261e8d1afd06bc4d70c142c85dfab588e3366345941acc9b0a325f5ad034125",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAguXEtuAips/eFvINUWJV3NpqKmx\n/+aWK5ussH/ZkCZKoAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEDApJjQ96SVYM4cE5OwTGzp9hydKWcepfpAoEVt1UzAk7nbgK73WdecHK\nw/G60TB6xQVz0m4Mc6Bl8VYtp0w2QJ\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 4,
+    "timestamp": "2026-08-21T04:32:11.712146+00:00",
+    "action": "finalize",
+    "data": {
+      "commit_sha": "0000000000000000000000000000000000000000",
+      "chain_length": 5,
+      "builder": {
+        "model": {
+          "id": "fixture-generator",
+          "source": "self-reported"
+        },
+        "claude_code": {
+          "version": "2.1.128 (Claude Code)",
+          "source": "measured"
+        },
+        "plugin": {
+          "version": "1.3.0",
+          "source": "engine-constant"
+        }
+      }
+    },
+    "prev_hash": "9261e8d1afd06bc4d70c142c85dfab588e3366345941acc9b0a325f5ad034125",
+    "hash": "4f9c87e9a462a577c680d54129e7258d10b1549530500a039f5d850fa9905502",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAguXEtuAips/eFvINUWJV3NpqKmx\n/+aWK5ussH/ZkCZKoAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEDk4U5fl9qZnYjqITqlTp5qU9ewev/QnnMGu/VAVEfLoorPJMBhwKcZFp\nFEepellfymmtiM71sMmalqM5pcxYUI\n-----END SSH SIGNATURE-----"
+  }
+]
