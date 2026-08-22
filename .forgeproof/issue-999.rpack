@@ -1,0 +1,47 @@
+{
+  "version": "1.0.0",
+  "format": "forgeproof-rpack",
+  "issue": {
+    "number": 999,
+    "title": "v1.0.1 compatibility fixture",
+    "url": ""
+  },
+  "requirements": [
+    {
+      "id": "REQ-1",
+      "text": "fixture artifact hashes and verifies forever",
+      "status": "covered",
+      "tests": [
+        "test_fixture_roundtrip",
+        "test_fixture_hash"
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "src/example.py",
+      "operation": "create",
+      "sha256": "9b03eb339790e7de6c48ae1e59ecc264e8f6dd382db7b26b5d74ab3f0a1e5f32"
+    }
+  ],
+  "decisions": [
+    {
+      "context": "Freeze v1.0.x behavior before the v1.1.0 engine changes",
+      "choice": "Generate this bundle with the unmodified v1.0.1 engine",
+      "rationale": "ROADMAP Principle 1: any .rpack ever signed must verify with every future verifier"
+    }
+  ],
+  "evaluation": {
+    "status": "pass",
+    "tests_passed": 2,
+    "tests_failed": 0,
+    "lint_errors": 0,
+    "requirement_coverage": "100%",
+    "uncovered_requirements": [],
+    "failed_tests": []
+  },
+  "chain_hash": "750cfbf06d453f6b447badf273a2657202d9a8c969f5afcaac7b6874c24371e3",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICtV/ea5ItsVjCfkw/6w3tIgcH1OzcoWnU6WZgXkXQi1 User@PC-951318",
+  "root_digest": "da9fef9fa4dfee5e6dbc06a8f5e235f8bd7171d5e69e9359f7c6b31a731ca837",
+  "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgK1X95rki2xWMJ+TD/rDe0iBwfU\n7NyhadTpZmBeRdCLUAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEDcGizrEo9PIo6RZzSuPCAOgIhNhWDU0qgy72SAoNOKs5TXL7nt728o4c\nmKWaDg+mhzEVwQ4HjMYS5YlARCc1oD\n-----END SSH SIGNATURE-----"
+}

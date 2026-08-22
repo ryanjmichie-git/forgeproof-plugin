@@ -1,0 +1,46 @@
+{
+  "version": "1.0.0",
+  "format": "forgeproof-rpack",
+  "issue": {
+    "number": 998,
+    "title": "v110 fixture",
+    "url": ""
+  },
+  "requirements": [
+    {
+      "id": "REQ-1",
+      "text": "fixture requirement",
+      "status": "covered",
+      "tests": [
+        "test_fixture"
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "src/example2.py",
+      "operation": "create",
+      "sha256": "a859096dbcc30a959fcd2d46b36703a7482c0cd2f5c50a977341b0cd630560ff"
+    }
+  ],
+  "decisions": [
+    {
+      "context": "c",
+      "choice": "x",
+      "rationale": "r"
+    }
+  ],
+  "evaluation": {
+    "status": "pass",
+    "tests_passed": 1,
+    "tests_failed": 0,
+    "lint_errors": 0,
+    "requirement_coverage": "100%",
+    "uncovered_requirements": [],
+    "failed_tests": []
+  },
+  "chain_hash": "fbc1b1f9d4a2a60d088a23a47704a47570e4a510497b21da7ac90f7d88c6061b",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKzOIZNaYTXcH9qw7smGFA3+rfSm2aSsrUlwnF9Y9DRQ User@PC-951318",
+  "root_digest": "f06c628435196664f69226001f7d36496f86e5dbb76f49b85224a4f8696f4ea1",
+  "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrM4hk1phNdwf2rDuyYYUDf6t9K\nbZpKytSXCcX1j0NFAAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEBcgNJezIOUG7hFaVPB3UyKZWJ5WOqu30ysGQK0NMjNt9mJC0omgdTm6T\nC0lA9MgdPT7aeXZ5mWoR2FiuI92zAI\n-----END SSH SIGNATURE-----"
+}
