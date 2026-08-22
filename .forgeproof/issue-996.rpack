@@ -1,0 +1,55 @@
+{
+  "version": "1.1.0",
+  "format": "forgeproof-rpack",
+  "issue": {
+    "number": 996,
+    "title": "v1.3.0 attestation fixture",
+    "url": ""
+  },
+  "requirements": [
+    {
+      "id": "REQ-1",
+      "text": "bundle embeds a cosign-verifiable in-toto attestation",
+      "status": "covered",
+      "tests": [
+        "test_attestation_fixture"
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "src/example4.py",
+      "operation": "create",
+      "sha256": "60b1e438f6e569f7629f418e9a261a3fe2f61a7781ba4ae058cd4581eddfd68a"
+    }
+  ],
+  "decisions": [],
+  "evaluation": {
+    "status": "pass",
+    "tests_passed": 1,
+    "tests_failed": 0,
+    "lint_errors": 0,
+    "requirement_coverage": "100%",
+    "uncovered_requirements": [],
+    "failed_tests": []
+  },
+  "chain_hash": "4e68c7720e35a047fc59ad86e1e17bb2f184023c0481e7c4062a9c3afc72f3e5",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILlxLbgIqbP3hbyDVFiVdzaaipsf/mliubrLB/2ZAmSq User@PC-951318",
+  "attestation": {
+    "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+    "verificationMaterial": {
+      "publicKey": {}
+    },
+    "dsseEnvelope": {
+      "payload": "eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjEiLCJwcmVkaWNhdGUiOnsiYnVpbGREZWZpbml0aW9uIjp7ImJ1aWxkVHlwZSI6Imh0dHBzOi8vZ2l0aHViLmNvbS9yeWFuam1pY2hpZS1naXQvZm9yZ2Vwcm9vZi1wbHVnaW4vYmxvYi9tYWluL3NraWxscy9ydW4vcmVmZXJlbmNlcy9ycGFjay1mb3JtYXQubWQjc2xzYS1idWlsZHR5cGUtdjEiLCJleHRlcm5hbFBhcmFtZXRlcnMiOnsiYXBwcm92YWxzIjpbeyJhcHByb3ZlciI6ImZpeHR1cmUtYXBwcm92ZXJAZXhhbXBsZS5jb20iLCJkZWNpc2lvbiI6ImFwcHJvdmVkIiwiZXZpZGVuY2UiOiJhZ2VudC1yZWNvcmRlZCIsImdhdGUiOiJwbGFuIiwibm90ZSI6ImZyb3plbiBmaXh0dXJlIGZvciBmb3JnZXByb29mLXZlcmlmeSBDSSJ9XSwiaXNzdWUiOnsibnVtYmVyIjo5OTYsInRpdGxlIjoidjEuMy4wIGF0dGVzdGF0aW9uIGZpeHR1cmUiLCJ1cmwiOiIifSwicmVxdWlyZW1lbnRzIjpbeyJpZCI6IlJFUS0xIiwic3RhdHVzIjoiY292ZXJlZCIsInRlc3RzIjpbInRlc3RfYXR0ZXN0YXRpb25fZml4dHVyZSJdLCJ0ZXh0IjoiYnVuZGxlIGVtYmVkcyBhIGNvc2lnbi12ZXJpZmlhYmxlIGluLXRvdG8gYXR0ZXN0YXRpb24ifV19LCJpbnRlcm5hbFBhcmFtZXRlcnMiOnsiYnVpbGRlciI6eyJjbGF1ZGVfY29kZSI6eyJzb3VyY2UiOiJtZWFzdXJlZCIsInZlcnNpb24iOiIyLjEuMTI4IChDbGF1ZGUgQ29kZSkifSwibW9kZWwiOnsiaWQiOiJmaXh0dXJlLWdlbmVyYXRvciIsInNvdXJjZSI6InNlbGYtcmVwb3J0ZWQifSwicGx1Z2luIjp7InNvdXJjZSI6ImVuZ2luZS1jb25zdGFudCIsInZlcnNpb24iOiIxLjMuMCJ9fX0sInJlc29sdmVkRGVwZW5kZW5jaWVzIjpbXX0sInJ1bkRldGFpbHMiOnsiYnVpbGRlciI6eyJpZCI6Imh0dHBzOi8vZ2l0aHViLmNvbS9yeWFuam1pY2hpZS1naXQvZm9yZ2Vwcm9vZi1wbHVnaW4vdHJlZS92MS4zLjAifSwiYnlwcm9kdWN0cyI6W3siYW5ub3RhdGlvbnMiOnsiZGlnZXN0T3ZlciI6InV0Zi04IGxmLW5vcm1hbGl6ZWQgZGVjb2RlZCB0ZXh0In0sImRpZ2VzdCI6eyJzaGEyNTYiOiI0ZTY4Yzc3MjBlMzVhMDQ3ZmM1OWFkODZlMWUxN2JiMmYxODQwMjNjMDQ4MWU3YzQwNjJhOWMzYWZjNzJmM2U1In0sIm5hbWUiOiIuZm9yZ2Vwcm9vZi9jaGFpbi05OTYuanNvbiJ9LHsiY29udGVudCI6ImV5Sm1ZV2xzWldSZmRHVnpkSE1pT2x0ZExDSnNhVzUwWDJWeWNtOXljeUk2TUN3aWNtVnhkV2x5WlcxbGJuUmZZMjkyWlhKaFoyVWlPaUl4TURBbElpd2ljM1JoZEhWeklqb2ljR0Z6Y3lJc0luUmxjM1J6WDJaaGFXeGxaQ0k2TUN3aWRHVnpkSE5mY0dGemMyVmtJam94TENKMWJtTnZkbVZ5WldSZmNtVnhkV2x5WlcxbGJuUnpJanBiWFgwPSIsIm1lZGlhVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24iLCJuYW1lIjoiZXZhbHVhdGlvbiJ9XSwibWV0YWRhdGEiOnsiZmluaXNoZWRPbiI6IjIwMjYtMDgtMjFUMDQ6MzI6MTEuNzEyMTQ2KzAwOjAwIiwiaW52b2NhdGlvbklkIjoiMjc4ZTNiZTBkYWY2MzdhYzdlNTU5OTJiMTAxMjJlOTA2ZDllYmNmMDQ0MWQzYWZmYjBmZjg1OTRlYzMwMjE4MyIsInN0YXJ0ZWRPbiI6IjIwMjYtMDgtMjFUMDQ6MzI6MTEuMDgyMTk0KzAwOjAwIn19fSwicHJlZGljYXRlVHlwZSI6Imh0dHBzOi8vc2xzYS5kZXYvcHJvdmVuYW5jZS92MSIsInN1YmplY3QiOlt7ImRpZ2VzdCI6eyJzaGEyNTYiOiI2MGIxZTQzOGY2ZTU2OWY3NjI5ZjQxOGU5YTI2MWEzZmUyZjYxYTc3ODFiYTRhZTA1OGNkNDU4MWVkZGZkNjhhIn0sIm5hbWUiOiJzcmMvZXhhbXBsZTQucHkifV19",
+      "payloadType": "application/vnd.in-toto+json",
+      "signatures": [
+        {
+          "sig": "be+YKm3Rdh2cGGM4cwHlYo3r3I8Ggw66tCA+kMXbjXyL3YFXuarv6tNpNTZigpFw5eyCZ3vSLx4eU7PWkVqeBA=="
+        }
+      ]
+    }
+  },
+  "root_digest": "995ac617ef0d2b3aafe44d81e7d430f6c7dc6050bb0251f6d89a3d533e147150",
+  "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAguXEtuAips/eFvINUWJV3NpqKmx\n/+aWK5ussH/ZkCZKoAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAED3BeIiai0hj4uT6+9Ub28Sg7gYdD8envPUHuuJdHZA7r9DC1HJK+Akdo\nn56VP8phHYuRDwRfN8oWm1u9zmwuwC\n-----END SSH SIGNATURE-----"
+}
