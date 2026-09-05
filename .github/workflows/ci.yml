@@ -67,6 +67,91 @@ jobs:
           fi
       - run: python3 -m pytest "${FP_TESTS}" -v
 
+  # The v1.3.0 ROADMAP criterion, proven mechanically on every push: the
+  # emitted attestation verifies via cosign with NO ForgeProof code in the
+  # verification path. Both binaries from the recorded interop contract run
+  # (the installer action is pinned by commit SHA and the cosign BINARY
+  # version is pinned exactly), so upstream cannot break this build without a
+  # deliberate pin-bump PR. Artifact cases pass the artifact PATH so cosign
+  # hashes each file itself — feeding the attestation's own digest back is
+  # vacuous for tamper detection (docs/cosign-interop.md) — and the one
+  # --digest case recomputes its digest from the on-disk file. cosign appears
+  # in this job ONLY: baseline verification is stdlib-only by principle, and
+  # it must never appear in preflight.
+  cosign-interop:
+    name: cosign interop (${{ matrix.cosign }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cosign: ["v2.6.5", "v3.1.3"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Installer v4.x is required for the cosign v3 line: v3.x cosign
+      # releases ship a .sigstore.json verification bundle instead of the
+      # detached .sig that installer v3.9.x still expects for custom
+      # versions (its download 404s -> exit 22 before cosign is installed).
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ matrix.cosign }}
+      - name: Build one real attested bundle with the actual engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          cosign version
+          python stress/make_bundle.py "$RUNNER_TEMP/interop" > "$RUNNER_TEMP/bundle.json"
+          cat "$RUNNER_TEMP/bundle.json"
+      - name: "Positive: every artifact subject verifies, cosign hashing the files itself"
+        shell: bash
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/bundle.json"
+          PEM=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['pem'])" "$B")
+          ATT=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['attestation'])" "$B")
+          python -c "import json,sys;print('\n'.join(json.load(open(sys.argv[1]))['artifacts']))" "$B" | tr -d '\r' |
+          while read -r f; do
+            cosign verify-blob-attestation --key "$PEM" --bundle "$ATT" \
+              --type slsaprovenance1 --insecure-ignore-tlog "$f"
+          done
+          # The --digest form too — with a digest recomputed from the ON-DISK
+          # file, never copied out of the attestation.
+          F0=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['artifacts'][0])" "$B")
+          D0=$(python -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$F0")
+          cosign verify-blob-attestation --key "$PEM" --bundle "$ATT" \
+            --type slsaprovenance1 --insecure-ignore-tlog --digest "$D0" --digestAlg sha256
+      - name: "Negative: flipped artifact byte must fail the claim check"
+        shell: bash
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/bundle.json"
+          PEM=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['pem'])" "$B")
+          ATT=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['attestation'])" "$B")
+          F0=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['artifacts'][0])" "$B")
+          python -c "import sys;p=sys.argv[1];d=bytearray(open(p,'rb').read());d[0]^=255;open(p,'wb').write(bytes(d))" "$F0"
+          if cosign verify-blob-attestation --key "$PEM" --bundle "$ATT" \
+               --type slsaprovenance1 --insecure-ignore-tlog "$F0"; then
+            echo "tampered artifact verified green — the claim check is vacuous" >&2
+            exit 1
+          fi
+          python -c "import sys;p=sys.argv[1];d=bytearray(open(p,'rb').read());d[0]^=255;open(p,'wb').write(bytes(d))" "$F0"
+      - name: "Negative: flipped envelope payload byte must fail the signature check"
+        shell: bash
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/bundle.json"
+          PEM=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['pem'])" "$B")
+          ATT=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['attestation'])" "$B")
+          F0=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['artifacts'][0])" "$B")
+          python -c "import base64,json,sys;p=sys.argv[1];a=json.load(open(p));pl=bytearray(base64.b64decode(a['dsseEnvelope']['payload']));pl[10]^=1;a['dsseEnvelope']['payload']=base64.b64encode(bytes(pl)).decode();open(p,'w',newline='').write(json.dumps(a,sort_keys=True,separators=(',',':')))" "$ATT"
+          if cosign verify-blob-attestation --key "$PEM" --bundle "$ATT" \
+               --type slsaprovenance1 --insecure-ignore-tlog "$F0"; then
+            echo "tampered envelope verified green — the signature check is broken" >&2
+            exit 1
+          fi
+
   validate:
     name: claude plugin validate
     runs-on: ubuntu-latest

@@ -28,7 +28,10 @@ The `hash` is computed over the canonical JSON (sorted keys, no whitespace) of t
 | `decision` | Significant decision made | `context` (string), `choice` (string), `rationale` (string) |
 | `test-result` | Test suite executed | `suite` (string), `passed` (int), `failed` (int), `coverage` (object mapping REQ-N to test names), `failed_tests` (array) |
 | `lint-result` | Linter executed | `tool` (string), `errors` (int), `warnings` (int) |
-| `finalize` | Chain finalized | `commit_sha` (string), `chain_length` (int) |
+| `approval` | Human decision at a gate (v1.3.0+) | `gate` (string), `decision` ("approved", "rejected", or "changes-requested"), `note` (string, may be empty), `approver` (string — filled by the engine from `git config user.email`, empty when unavailable; never taken from a flag) |
+| `finalize` | Chain finalized | `commit_sha` (string), `chain_length` (int), `builder` (object, v1.3.0+ — builder identity with per-field provenance labels: `model` `source: self-reported`, `claude_code` `source: measured`, `plugin` `source: engine-constant`) |
+
+Approvals must be recorded before `finalize` (the chain refuses appends afterwards); they are sealed into the bundle's attestation as agent-recorded evidence.
 
 ## Integrity Properties
 

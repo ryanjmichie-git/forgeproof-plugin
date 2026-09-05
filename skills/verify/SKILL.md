@@ -88,6 +88,17 @@ not "tampered." If you are verifying in the origin repo and expect the files to 
 present, treat `artifacts_missing > 0` or a "Chain file not found" warning as a signal
 that the working tree is incomplete, and say so.
 
+**Attestation (bundles from v1.3.0 on).** The result carries an `attestation`
+object (`present`, `predicate_type`, `subject_count`, `key_id`, `builder`,
+`approvals`) and three additional checks: `attestation` (the embedded in-toto
+statement is well-formed), `attestation_signature` (the DSSE signature
+verifies under the bundle's own key), and `attestation_subjects` (the signed
+subjects equal the bundle's artifacts and the chain byproduct matches the
+sealed chain hash). When present and green, mention the builder identity
+(model is self-reported) and any recorded approvals. On pre-v1.3 bundles all
+three checks report `skipped` — that is normal and silent, never a warning
+or a downgrade of the result.
+
 **If verification failed (errors present):**
 Report each error clearly. Common failure scenarios:
 - "Root digest mismatch" — the bundle contents have been modified since signing
@@ -95,11 +106,36 @@ Report each error clearly. Common failure scenarios:
 - "Chain hash mismatch" — the chain file was modified after the bundle was signed
 - "Block N: prev_hash does not match" — a block in the chain was tampered with
 - "Artifact tampered" — a source file was modified after the bundle was signed
+- "Attestation signature invalid" / "Attestation key mismatch" /
+  "Attestation subjects do not match" / "Attestation chain digest" — the
+  embedded attestation was altered, or re-signed with a key that is not the
+  bundle's own (tamper class)
+- "Attestation malformed" — the attestation was *signed* in a broken shape;
+  verification fails, but this indicates an engine bug or a hand-built
+  statement, not post-signing alteration — do not call it tamper
 - "[strict] ..." — evidence is missing under `--strict` mode (absent chain or
   artifacts), NOT tamper — the same condition is a warning without `--strict`
 
 For each error, explain what it means in plain language and what the user
 should do about it.
+
+## Verify with cosign instead (alternative view — never a required step)
+
+Bundles from v1.3.0 on export their attestation as
+`.forgeproof/issue-<N>.sigstore.json` with the signing key as
+`.forgeproof/issue-<N>.pub.pem`. Anyone can verify that attestation with
+plain cosign and no ForgeProof code:
+
+```
+cosign verify-blob-attestation --key .forgeproof/issue-<N>.pub.pem \
+  --bundle .forgeproof/issue-<N>.sigstore.json \
+  --type slsaprovenance1 --insecure-ignore-tlog <artifact-path>
+```
+
+Run it once per artifact listed in the bundle — cosign hashes each file
+itself and checks the digest against the signed subjects. Baseline
+verification never requires cosign; see `docs/cosign-interop.md` for what
+each flag proves and the pinned versions this is tested against.
 
 ## Verify a PR's bundle
 

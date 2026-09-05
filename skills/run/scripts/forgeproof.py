@@ -22,6 +22,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -38,7 +39,14 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 CHAIN_DIR = Path(".forgeproof")
-RPACK_VERSION = "1.0.0"
+# Mirrors .claude-plugin/plugin.json, which stays the single source of
+# version truth — a sync test fails the build if the two ever drift.
+PLUGIN_VERSION = "1.3.0"
+RPACK_VERSION = "1.1.0"
+# Every bundle format version ever shipped. Membership-only and append-only:
+# NEVER an ordering, and no version implies any particular key is present
+# (in-test bundle builders and the frozen fixtures depend on that).
+KNOWN_RPACK_VERSIONS = frozenset({"1.0.0", "1.1.0"})
 RPACK_FORMAT = "forgeproof-rpack"
 GENESIS_PREV_HASH = "0" * 64
 
@@ -137,6 +145,10 @@ def generate_ephemeral_keypair(issue: str) -> tuple[Path, Path]:
     # Remove existing files to avoid ssh-keygen prompt
     private.unlink(missing_ok=True)
     public.unlink(missing_ok=True)
+    # -N "" (no passphrase) is a load-bearing contract, not a convenience:
+    # openssh_ed25519_seed can only parse the unencrypted openssh-key-v1
+    # container, and finalize hard-fails on an unparseable key rather than
+    # emit a bundle without its attestation.
     result = run(["ssh-keygen", "-t", "ed25519", "-f", str(private), "-N", "", "-q"])
     if result.returncode != 0:
         die(f"ssh-keygen failed: {result.stderr.strip()}")
@@ -224,6 +236,320 @@ def delete_private_key(private_path: Path) -> None:
     # Also remove the public key file from /tmp (it's embedded in the bundle)
     pub = Path(f"{private_path}.pub")
     pub.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Raw Ed25519 (RFC 8032) — the cosign-verifiable tier
+#
+# A pure-stdlib RFC 8032 implementation over the SAME ephemeral key that signs
+# the SSHSIG chain/bundle signature: the 32-byte seed is parsed out of the
+# unencrypted openssh-key-v1 file generate_ephemeral_keypair writes. Signing
+# is deterministic per the RFC, which is what makes the attestation sidecar
+# reproducible. Verification is hardened for attacker-supplied input: it
+# returns False rather than raising, and rejects non-canonical encodings —
+# s >= L (the signature-malleability class this repo has patched twice at the
+# SSHSIG tier), y >= p, non-square x, and x = 0 with the sign bit set.
+# Deliberately absent: a small-order-point blocklist. The DSSE key must equal
+# the bundle's own ssh-ed25519 key, which a bundle-forging attacker controls
+# outright — they would use a well-formed key they own, so a blocklist has no
+# detection power in this trust model; the anchor is the committed bundle.
+# ---------------------------------------------------------------------------
+
+_ED25519_P = 2**255 - 19
+_ED25519_L = 2**252 + 27742317777372353535851937790883648493
+_ED25519_D = (-121665 * pow(121666, _ED25519_P - 2, _ED25519_P)) % _ED25519_P
+_ED25519_SQRT_M1 = pow(2, (_ED25519_P - 1) // 4, _ED25519_P)
+
+
+def _ed25519_decode_point(encoded: bytes) -> tuple[int, int]:
+    """Decode a 32-byte point encoding, canonically (RFC 8032 5.1.3).
+    Raises ValueError on any invalid or non-canonical encoding."""
+    if len(encoded) != 32:
+        raise ValueError("point encoding must be 32 bytes")
+    p = _ED25519_P
+    val = int.from_bytes(encoded, "little")
+    sign = val >> 255
+    y = val & ((1 << 255) - 1)
+    if y >= p:
+        raise ValueError("non-canonical point encoding (y >= p)")
+    xx = (y * y - 1) * pow(_ED25519_D * y * y + 1, p - 2, p) % p
+    x = pow(xx, (p + 3) // 8, p)
+    if (x * x - xx) % p:
+        x = x * _ED25519_SQRT_M1 % p
+    if (x * x - xx) % p:
+        raise ValueError("invalid point encoding (x is not a square)")
+    if x == 0 and sign:
+        raise ValueError("invalid point encoding (x = 0 with sign bit set)")
+    if x & 1 != sign:
+        x = p - x
+    return (x, y)
+
+
+def _ed25519_encode_point(point: tuple[int, int]) -> bytes:
+    x, y = point
+    return (y | ((x & 1) << 255)).to_bytes(32, "little")
+
+
+def _ed25519_add(a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
+    """Affine twisted-Edwards addition (the formula is complete for Ed25519,
+    so it also serves as doubling)."""
+    p = _ED25519_P
+    x1, y1 = a
+    x2, y2 = b
+    dxy = _ED25519_D * x1 * x2 * y1 * y2 % p
+    x3 = (x1 * y2 + x2 * y1) * pow(1 + dxy, p - 2, p)
+    y3 = (y1 * y2 + x1 * x2) * pow(1 - dxy, p - 2, p)
+    return (x3 % p, y3 % p)
+
+
+def _ed25519_scalarmult(point: tuple[int, int], e: int) -> tuple[int, int]:
+    result = (0, 1)  # neutral element
+    while e:
+        if e & 1:
+            result = _ed25519_add(result, point)
+        point = _ed25519_add(point, point)
+        e >>= 1
+    return result
+
+
+# Base point B: y = 4/5, x even (decoded from its canonical encoding so the
+# same validated path defines it).
+_ED25519_B = _ed25519_decode_point(
+    ((4 * pow(5, _ED25519_P - 2, _ED25519_P)) % _ED25519_P).to_bytes(32, "little"))
+
+
+def _ed25519_secret_scalar(seed: bytes) -> tuple[int, bytes]:
+    """(clamped scalar, prefix) from a 32-byte seed (RFC 8032 5.1.5)."""
+    if len(seed) != 32:
+        raise ValueError("Ed25519 seed must be 32 bytes")
+    h = hashlib.sha512(bytes(seed)).digest()
+    a = int.from_bytes(h[:32], "little")
+    a &= (1 << 254) - 8
+    a |= 1 << 254
+    return a, h[32:]
+
+
+def ed25519_public_from_seed(seed: bytes) -> bytes:
+    """Derive the 32-byte public key from a 32-byte seed."""
+    a, _ = _ed25519_secret_scalar(seed)
+    return _ed25519_encode_point(_ed25519_scalarmult(_ED25519_B, a))
+
+
+def ed25519_sign(seed: bytes, message: bytes) -> bytes:
+    """Deterministic RFC 8032 Ed25519 signature: 64 bytes, R || s. Plain
+    Ed25519 — NOT Ed25519ph — which is the variant the pinned cosign binaries
+    verify (spike-proven; see PLAN_v1.3.0.md Phase 0)."""
+    a, prefix = _ed25519_secret_scalar(seed)
+    public = _ed25519_encode_point(_ed25519_scalarmult(_ED25519_B, a))
+    r = int.from_bytes(
+        hashlib.sha512(prefix + bytes(message)).digest(), "little") % _ED25519_L
+    r_enc = _ed25519_encode_point(_ed25519_scalarmult(_ED25519_B, r))
+    k = int.from_bytes(
+        hashlib.sha512(r_enc + public + bytes(message)).digest(),
+        "little") % _ED25519_L
+    s = (r + k * a) % _ED25519_L
+    return r_enc + s.to_bytes(32, "little")
+
+
+def ed25519_verify(public: bytes, message: bytes, signature: bytes) -> bool:
+    """Verify an RFC 8032 Ed25519 signature over hostile input: returns False
+    on any malformed or non-canonical value, never raises."""
+    if len(public) != 32 or len(signature) != 64:
+        return False
+    try:
+        point_a = _ed25519_decode_point(bytes(public))
+        point_r = _ed25519_decode_point(bytes(signature[:32]))
+    except ValueError:
+        return False
+    s = int.from_bytes(signature[32:], "little")
+    if s >= _ED25519_L:
+        return False
+    k = int.from_bytes(
+        hashlib.sha512(
+            bytes(signature[:32]) + bytes(public) + bytes(message)).digest(),
+        "little") % _ED25519_L
+    left = _ed25519_scalarmult(_ED25519_B, s)
+    right = _ed25519_add(point_r, _ed25519_scalarmult(point_a, k))
+    return left == right
+
+
+def openssh_ed25519_seed(private_path: Path) -> bytes:
+    """Extract the 32-byte Ed25519 seed from an UNENCRYPTED openssh-key-v1
+    private key file (the kind generate_ephemeral_keypair writes with -N "").
+    Dies with an actionable message on any structural surprise — an encrypted
+    key, a non-ed25519 key, truncation, or an embedded public key that does
+    not match the one derived from the seed (a parse bug must die loudly,
+    never sign with the wrong key)."""
+    label = f"ephemeral private key ({private_path})"
+    try:
+        text = private_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        die(f"cannot read {label}: {e}")
+
+    begin = "-----BEGIN OPENSSH PRIVATE KEY-----"
+    end = "-----END OPENSSH PRIVATE KEY-----"
+    start = text.find(begin)
+    stop = text.find(end)
+    if start < 0 or stop <= start:
+        die(f"{label} is not an OpenSSH private key (missing PEM armor)")
+    try:
+        blob = base64.b64decode(text[start + len(begin):stop].encode("ascii"))
+    except (ValueError, UnicodeEncodeError):
+        die(f"{label} has a corrupt base64 body")
+
+    def _cursor(buf: bytes):
+        state = [0]
+
+        def take(n: int, what: str) -> bytes:
+            if state[0] + n > len(buf):
+                die(f"{label} is truncated or corrupt (while reading {what})")
+            piece = buf[state[0]:state[0] + n]
+            state[0] += n
+            return piece
+
+        def take_str(what: str) -> bytes:
+            n = int.from_bytes(take(4, what + " length"), "big")
+            return take(n, what)
+
+        return take, take_str
+
+    magic = b"openssh-key-v1\x00"
+    if not blob.startswith(magic):
+        die(f"{label} is not an openssh-key-v1 container")
+    take, take_str = _cursor(blob[len(magic):])
+    cipher = take_str("cipher name")
+    kdf = take_str("kdf name")
+    take_str("kdf options")
+    if cipher != b"none" or kdf != b"none":
+        die(f"{label} is encrypted (cipher "
+            f"{cipher.decode(errors='replace')!r}) — ForgeProof ephemeral "
+            "keys are always written without a passphrase")
+    nkeys = int.from_bytes(take(4, "key count"), "big")
+    if nkeys != 1:
+        die(f"{label} contains {nkeys} keys (expected exactly 1)")
+    take_str("public key blob")
+    private_section = take_str("private key section")
+
+    ptake, ptake_str = _cursor(private_section)
+    if ptake(4, "check value") != ptake(4, "check value"):
+        die(f"{label} check values differ — corrupt or encrypted key")
+    keytype = ptake_str("key type")
+    if keytype != b"ssh-ed25519":
+        die(f"{label} is a {keytype.decode(errors='replace')!r} key "
+            "(expected ssh-ed25519)")
+    pub = ptake_str("public key")
+    priv = ptake_str("private key")
+    ptake_str("comment")
+    if len(pub) != 32 or len(priv) != 64 or priv[32:] != pub:
+        die(f"{label} has malformed ed25519 key material")
+    seed = priv[:32]
+    if ed25519_public_from_seed(seed) != pub:
+        die(f"{label}: public key derived from the seed does not match the "
+            "embedded key blob — refusing to sign with a misparsed key")
+    return seed
+
+
+def ssh_ed25519_pubkey_bytes(pub_line: str) -> bytes:
+    """Raw 32-byte key from an OpenSSH public-key line ('ssh-ed25519 <b64>
+    [comment]'). Raises ValueError on malformed input so each caller decides
+    the failure mode (finalize dies; verify turns a check red). Only the first
+    two whitespace-separated fields are read — the comment may itself contain
+    spaces (ssh-keygen defaults it to username@hostname)."""
+    fields = pub_line.split()
+    if len(fields) < 2 or fields[0] != "ssh-ed25519":
+        raise ValueError("not an ssh-ed25519 public key line")
+    try:
+        blob = base64.b64decode(fields[1].encode("ascii"), validate=True)
+    except (ValueError, UnicodeEncodeError) as e:
+        raise ValueError(f"invalid public key base64: {e}")
+    # SSH wire blob: string("ssh-ed25519") + string(32-byte key), exactly.
+    header = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"
+    if not blob.startswith(header) or len(blob) != len(header) + 32:
+        raise ValueError("public key blob is not a raw ssh-ed25519 key")
+    return blob[len(header):]
+
+
+# RFC 8410 section 10.1: DER SubjectPublicKeyInfo header for Ed25519; the
+# 12-byte prefix + 32 raw key bytes = exactly 44 bytes.
+ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
+
+
+def ed25519_spki_pem(public: bytes) -> str:
+    """SubjectPublicKeyInfo PEM for a raw Ed25519 key. The block type must be
+    PUBLIC KEY (sigstore accepts only PUBLIC KEY and RSA PUBLIC KEY); LF line
+    endings; the 44-byte DER fits one base64 line, always starting
+    MCowBQYDK2VwAyEA."""
+    if len(public) != 32:
+        raise ValueError("Ed25519 public key must be 32 bytes")
+    body = base64.b64encode(ED25519_SPKI_PREFIX + bytes(public)).decode("ascii")
+    return f"-----BEGIN PUBLIC KEY-----\n{body}\n-----END PUBLIC KEY-----\n"
+
+
+# ---------------------------------------------------------------------------
+# DSSE envelope + Sigstore bundle encoding (amendment-v2 layout)
+# ---------------------------------------------------------------------------
+
+DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json"
+SIGSTORE_BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
+
+
+def dsse_pae(payload_type: str, payload: bytes) -> bytes:
+    """DSSE Pre-Authentication Encoding: 'DSSEv1' + ASCII decimal lengths,
+    exactly four single spaces, no trailing separator."""
+    ptype = payload_type.encode("utf-8")
+    return b"DSSEv1 %d %s %d %s" % (len(ptype), ptype, len(payload), payload)
+
+
+def build_dsse_envelope(payload: bytes, signer) -> dict:
+    """DSSE envelope over an in-toto payload: standard base64 WITH padding for
+    payload and sig (protojson round-trips those byte-identically, which the
+    sidecar contract needs), exactly ONE signature, and the signature object
+    carries `sig` only — NO keyid (cosign's envelope verifier skips any
+    signature whose non-empty keyid differs from its own derivation)."""
+    sig = signer.sign(dsse_pae(DSSE_PAYLOAD_TYPE, payload))
+    return {
+        "payload": base64.b64encode(payload).decode("ascii"),
+        "payloadType": DSSE_PAYLOAD_TYPE,
+        "signatures": [{"sig": base64.b64encode(sig).decode("ascii")}],
+    }
+
+
+def build_sigstore_bundle(envelope: dict, signer) -> dict:
+    """Sigstore bundle v0.3 wrapper. protojson rejects unknown fields, so the
+    wrapper carries nothing ForgeProof-specific — everything of ours lives
+    inside the in-toto predicate. `dsseEnvelope` is a sibling of
+    `verificationMaterial`, never nested inside it."""
+    return {
+        "mediaType": SIGSTORE_BUNDLE_MEDIA_TYPE,
+        "verificationMaterial": signer.verification_material(),
+        "dsseEnvelope": envelope,
+    }
+
+
+class EphemeralEd25519Signer:
+    """v1.3 attestation signer, and the v1.4 seam: a signer is anything with
+    .public_bytes, .sign(data) -> bytes, and .verification_material() -> dict.
+    The keyless tier (Fulcio cert + Rekor tlogEntries) implements the same
+    three members and swaps only the verification material, leaving the
+    envelope byte-identical.
+
+    verification_material() is the EMPTY public-key identifier (amendment v2):
+    the bundle wrapper carries no key ids at all. The key itself travels in
+    the .rpack public_key field and the .pub.pem sidecar."""
+
+    def __init__(self, seed: bytes):
+        self.seed = seed
+        self.public_bytes = ed25519_public_from_seed(seed)
+
+    @classmethod
+    def from_private_key(cls, private_path: Path) -> "EphemeralEd25519Signer":
+        return cls(openssh_ed25519_seed(private_path))
+
+    def sign(self, data: bytes) -> bytes:
+        return ed25519_sign(self.seed, data)
+
+    def verification_material(self) -> dict:
+        return {"publicKey": {}}
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +910,10 @@ def cmd_init(args: argparse.Namespace) -> None:
             path.unlink(missing_ok=True)
             rpack = CHAIN_DIR / f"issue-{issue}.rpack"
             rpack.unlink(missing_ok=True)
+            # Attestation sidecars too: a stale sidecar surviving --force
+            # could later be committed next to a bundle it does not match.
+            (CHAIN_DIR / f"issue-{issue}.sigstore.json").unlink(missing_ok=True)
+            (CHAIN_DIR / f"issue-{issue}.pub.pem").unlink(missing_ok=True)
             key = Path(tempfile.gettempdir()) / f"forgeproof_{issue}_ed25519"
             key.unlink(missing_ok=True)
             Path(f"{key}.pub").unlink(missing_ok=True)
@@ -633,6 +963,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 # Per-action flag contract. Each action builds the exact same data dict shape
 # the v1.0.x --data JSON produced — chain and bundle formats are untouched.
 RECORD_FLAG_SPEC = {
+    "approval": {"required": ["gate", "decision"], "optional": ["note"]},
     "branch-create": {"required": ["branch", "base", "base_sha"], "optional": []},
     "file-edit": {"required": ["path", "operation"], "optional": []},
     "decision": {"required": ["context", "choice", "rationale"], "optional": []},
@@ -640,12 +971,33 @@ RECORD_FLAG_SPEC = {
     "lint-result": {"required": ["tool", "errors", "warnings"], "optional": []},
 }
 
+# Every flag declared in build_parser for record MUST be listed here, or its
+# value is invisible to the missing/unexpected guard below — silently dropped
+# on its own action and silently accepted on every other.
 _RECORD_DATA_FLAGS = [
     "branch", "base", "base_sha", "path", "operation",
     "context", "choice", "rationale",
     "suite", "passed", "failed", "covers", "failed_test",
     "tool", "errors", "warnings",
+    "gate", "decision", "note",
 ]
+
+
+def _approver_email() -> str:
+    """Approver identity for approval blocks, read from git config rather
+    than trusted from a flag. Best-effort by design: returns "" on ANY
+    failure — git absent, no identity configured, non-zero exit, timeout —
+    because an approval record must never die or block on identity lookup.
+    Module-level so tests patch it in one place."""
+    if not shutil.which("git"):
+        return ""
+    try:
+        result = run(["git", "config", "user.email"], timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
 
 
 def _flag_name(attr: str) -> str:
@@ -735,8 +1087,24 @@ def _record_data_from_flags(args: argparse.Namespace) -> dict:
             "failed_tests": list(args.failed_test or []),
         }
 
-    # lint-result
-    return {"tool": args.tool, "errors": args.errors, "warnings": args.warnings}
+    if action == "approval":
+        # The engine fills approver itself; a flag would let the recording
+        # agent assert an arbitrary identity.
+        return {
+            "gate": args.gate,
+            "decision": args.decision,
+            "note": args.note or "",
+            "approver": _approver_email(),
+        }
+
+    if action == "lint-result":
+        return {"tool": args.tool, "errors": args.errors, "warnings": args.warnings}
+
+    # Explicit fallthrough: an action added to RECORD_FLAG_SPEC without a
+    # branch above must fail loudly, never seal a wrong-shaped data dict
+    # built from unset attributes.
+    die(f"internal error: action '{action}' has no data builder in "
+        "_record_data_from_flags")
 
 
 def cmd_record(args: argparse.Namespace) -> None:
@@ -776,6 +1144,141 @@ def cmd_record(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Subcommand: finalize
 # ---------------------------------------------------------------------------
+
+
+def _claude_code_version() -> str:
+    """Best-effort Claude Code CLI version probe ('measured' in the builder
+    identity). Resolved through shutil.which ONLY — never exec an env-var
+    path directly; which() also resolves the .cmd shim on Windows — with a
+    hard timeout. Degrades to "unknown" on every failure."""
+    exe = shutil.which("claude")
+    if not exe:
+        return "unknown"
+    try:
+        result = run([exe, "--version"], timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return result.stdout.strip() or "unknown"
+
+
+# Attestation-tier constants. The buildType URI documents the parameter
+# schema; builder.id is version-scoped and resolves to documentation of its
+# scope and trust base (references/rpack-format.md).
+FORGEPROOF_REPO_URL = "https://github.com/ryanjmichie-git/forgeproof-plugin"
+FORGEPROOF_BUILD_TYPE = (
+    FORGEPROOF_REPO_URL
+    + "/blob/main/skills/run/references/rpack-format.md#slsa-buildtype-v1")
+
+
+def forgeproof_builder_id() -> str:
+    return f"{FORGEPROOF_REPO_URL}/tree/v{PLUGIN_VERSION}"
+
+
+def load_attestation_signer(key_path: Path, public_key: str) -> EphemeralEd25519Signer:
+    """Parse the ephemeral key's seed and bind it to the published public
+    key. Called BEFORE any chain mutation: an attestation in every v1.3
+    bundle is the product promise, so an unparseable or mismatched key is a
+    hard fail while the chain is still un-finalized — never a silently
+    degraded bundle. Module-level so tests that feed finalize a fake key
+    file can patch it."""
+    signer = EphemeralEd25519Signer.from_private_key(key_path)
+    try:
+        expected = ssh_ed25519_pubkey_bytes(public_key)
+    except ValueError as e:
+        die(f"public key file is not a valid ssh-ed25519 line: {e}")
+    if signer.public_bytes != expected:
+        die(f"ephemeral key mismatch: the private key at {key_path} does not "
+            "correspond to the published public key — refusing to sign")
+    return signer
+
+
+def build_intoto_statement(bundle: dict, chain: list[dict],
+                           approvals: list[dict], repo_url: str) -> dict:
+    """in-toto Statement v1 carrying a SLSA Provenance v1 predicate.
+    Deterministic and time-free: timestamps are copied verbatim from chain
+    blocks (already RFC 3339 UTC) and invocationId is the genesis hash."""
+    issue_num = bundle["issue"]["number"]
+    chain_name = f".forgeproof/chain-{issue_num}.json"
+    subjects = [{"name": a["path"], "digest": {"sha256": a["sha256"]}}
+                for a in bundle["artifacts"]]
+    if not subjects:
+        # A statement subject may not be empty (in-toto rejects it), so a
+        # zero-file-edit run attests the chain itself.
+        subjects = [{"name": chain_name,
+                     "digest": {"sha256": bundle["chain_hash"]}}]
+
+    resolved = []
+    for block in chain:
+        if block.get("action") == "branch-create":
+            data = block.get("data", {})
+            base = data.get("base", "")
+            uri = (f"git+{repo_url}@refs/heads/{base}" if repo_url
+                   else f"git+refs/heads/{base}")
+            resolved.append({"uri": uri,
+                             "digest": {"gitCommit": data.get("base_sha", "")}})
+            break
+
+    genesis = chain[0]
+    finalize_block = chain[-1]
+    builder_identity = finalize_block.get("data", {}).get("builder", {})
+
+    predicate = {
+        "buildDefinition": {
+            "buildType": FORGEPROOF_BUILD_TYPE,
+            "externalParameters": {
+                "issue": bundle["issue"],
+                "requirements": bundle["requirements"],
+                # The AI records that the human approved: asserted evidence,
+                # not cryptographic proof of consent.
+                "approvals": [dict(a, evidence="agent-recorded")
+                              for a in approvals],
+            },
+            "internalParameters": {"builder": builder_identity},
+            "resolvedDependencies": resolved,
+        },
+        "runDetails": {
+            "builder": {"id": forgeproof_builder_id()},
+            "metadata": {
+                "invocationId": genesis["hash"],
+                "startedOn": genesis["timestamp"],
+                "finishedOn": finalize_block["timestamp"],
+            },
+            "byproducts": [
+                {
+                    "name": chain_name,
+                    # MUST be the same chain_hash the bundle seals: sha256
+                    # over the UTF-8, LF-normalized DECODED TEXT of the chain
+                    # file, never a re-hash of its raw bytes (which would
+                    # false-red every Windows-authored bundle).
+                    "digest": {"sha256": bundle["chain_hash"]},
+                    "annotations": {
+                        "digestOver": "utf-8 lf-normalized decoded text"},
+                },
+                {
+                    "name": "evaluation",
+                    "mediaType": "application/json",
+                    "content": base64.b64encode(
+                        canonical_json(bundle["evaluation"]).encode("utf-8")
+                    ).decode("ascii"),
+                },
+            ],
+        },
+    }
+    return {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": subjects,
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "predicate": predicate,
+    }
+
+
+def build_attestation(statement: dict, signer) -> dict:
+    """DSSE-sign a statement and wrap it in a Sigstore bundle. Module-level
+    so finalize tests can patch it for failure injection."""
+    payload = canonical_json(statement).encode("utf-8")
+    return build_sigstore_bundle(build_dsse_envelope(payload, signer), signer)
 
 
 def cmd_finalize(args: argparse.Namespace) -> None:
@@ -826,11 +1329,30 @@ def cmd_finalize(args: argparse.Namespace) -> None:
             "and re-run finalize."
         )
 
+    # Parse the attestation signing seed and bind it to the published public
+    # key BEFORE any chain mutation: an attestation in every v1.3 bundle is
+    # the product promise, so an unparseable or mismatched key must hard-fail
+    # while the chain is still un-finalized (resolved question 8).
+    attestation_signer = load_attestation_signer(key_path, public_key)
+
+    # Builder identity, with per-field provenance labels. The model id is
+    # whatever the agent claims; the same shape-check discipline as
+    # cmd_verify's flag reads keeps a MagicMock namespace from leaking a
+    # non-string into json.dumps.
+    model = getattr(args, "model", None)
+    model = model if isinstance(model, str) else ""
+    builder_identity = {
+        "model": {"id": model, "source": "self-reported"},
+        "claude_code": {"version": _claude_code_version(), "source": "measured"},
+        "plugin": {"version": PLUGIN_VERSION, "source": "engine-constant"},
+    }
+
     # Build finalize block
     last_block = chain[-1]
     finalize_data = {
         "commit_sha": args.commit,
         "chain_length": len(chain) + 1,  # including the finalize block itself
+        "builder": builder_identity,
     }
 
     finalize_block = build_block(
@@ -841,143 +1363,197 @@ def cmd_finalize(args: argparse.Namespace) -> None:
         key_path=key_path,
     )
 
-    chain.append(finalize_block)
-    save_chain(issue, chain)
-
-    # Extract data from chain for the bundle
-    genesis = chain[0]
-    issue_data = genesis["data"]
-
-    # Collect artifacts, decisions, and evaluation data from chain.
-    # Artifacts are deduplicated per path keeping the latest record, so a
-    # re-edited file appears once, with the hash that matches disk at signing
-    # time (the full edit history stays in the chain).
-    artifacts_by_path: dict[str, dict] = {}
-    decisions = []
-    test_results = []
-    lint_results = []
-
-    for block in chain:
-        action = block["action"]
-        d = block["data"]
-        if action == "file-edit":
-            artifacts_by_path[d.get("path", "")] = {
-                "path": d.get("path", ""),
-                "operation": d.get("operation", ""),
-                "sha256": d.get("sha256", ""),
-            }
-        elif action == "decision":
-            decisions.append({
-                "context": d.get("context", ""),
-                "choice": d.get("choice", ""),
-                "rationale": d.get("rationale", ""),
-            })
-        elif action == "test-result":
-            test_results.append(d)
-        elif action == "lint-result":
-            lint_results.append(d)
-
-    artifacts = list(artifacts_by_path.values())
-
-    # Compute evaluation status
-    total_passed = sum(t.get("passed", 0) for t in test_results)
-    total_failed = sum(t.get("failed", 0) for t in test_results)
-    total_lint_errors = sum(l.get("errors", 0) for l in lint_results)
-
-    # Collect coverage and failure info
-    all_coverage = {}
-    for t in test_results:
-        for req_id, tests in t.get("coverage", {}).items():
-            all_coverage.setdefault(req_id, []).extend(tests)
-
-    all_reqs = issue_data.get("requirements", [])
-    req_ids = []
-    for r in all_reqs:
-        if isinstance(r, str) and ":" in r:
-            req_ids.append(r.split(":")[0].strip())
-        elif isinstance(r, dict):
-            req_ids.append(r.get("id", ""))
-
-    uncovered = [rid for rid in req_ids if rid not in all_coverage] if req_ids else []
-    failed_tests = []
-    for t in test_results:
-        failed_tests.extend(t.get("failed_tests", []))
-
-    if total_failed == 0 and total_lint_errors == 0 and not uncovered:
-        eval_status = "pass"
-    elif total_passed == 0 and total_failed > 0:
-        eval_status = "fail"
-    else:
-        eval_status = "partial"
-
-    coverage_pct = "0%"
-    if req_ids:
-        covered_count = len(req_ids) - len(uncovered)
-        coverage_pct = f"{round(covered_count / len(req_ids) * 100)}%"
-
-    # Get repo URL from gh if available
-    repo_url = ""
-    if shutil.which("gh"):
-        gh_result = run(["gh", "repo", "view", "--json", "url", "-q", ".url"])
-        if gh_result.returncode == 0:
-            repo_url = gh_result.stdout.strip()
-
-    # Build requirements list for bundle
-    bundle_reqs = []
-    for r in all_reqs:
-        if isinstance(r, str) and ":" in r:
-            rid, rtext = r.split(":", 1)
-            rid = rid.strip()
-            rtext = rtext.strip()
-        elif isinstance(r, dict):
-            rid = r.get("id", "")
-            rtext = r.get("text", "")
-        else:
-            continue
-        status = "covered" if rid in all_coverage else "uncovered"
-        bundle_reqs.append({
-            "id": rid,
-            "text": rtext,
-            "status": status,
-            "tests": all_coverage.get(rid, []),
-        })
-
-    # Assemble the bundle (without root_digest and signature yet)
-    bundle = {
-        "version": RPACK_VERSION,
-        "format": RPACK_FORMAT,
-        "issue": {
-            "number": issue_data.get("issue", int(issue)),
-            "title": issue_data.get("title", ""),
-            "url": f"{repo_url}/issues/{issue}" if repo_url else "",
-        },
-        "requirements": bundle_reqs,
-        "artifacts": artifacts,
-        "decisions": decisions,
-        "evaluation": {
-            "status": eval_status,
-            "tests_passed": total_passed,
-            "tests_failed": total_failed,
-            "lint_errors": total_lint_errors,
-            "requirement_coverage": coverage_pct,
-            "uncovered_requirements": uncovered,
-            "failed_tests": failed_tests,
-        },
-        "chain_hash": sha256_hex(chain_path(issue).read_text()),
-        "public_key": public_key,
-    }
-
-    # Compute root digest over the bundle content
-    root_digest = sha256_hex(canonical_json(bundle))
-    bundle["root_digest"] = root_digest
-
-    # Sign the root digest
-    bundle["signature"] = sign_ed25519(root_digest, key_path)
-
-    # Write the .rpack file
-    CHAIN_DIR.mkdir(exist_ok=True)
+    # Everything from the chain append through the sidecar writes runs under
+    # a rollback guard. chain_hash is derived from the chain file ON DISK
+    # (LF-normalized decoded text), so the chain must be saved before the
+    # attestation can be built; if anything after that save fails, the chain
+    # file is restored byte-for-byte and every partial output removed, so a
+    # failed finalize never strands a finalized chain without its outputs.
+    # The private key is deleted only after all outputs, keeping the run
+    # retryable.
+    chain_file = chain_path(issue)
+    chain_before = chain_file.read_bytes()
     rpack_path = CHAIN_DIR / f"issue-{issue}.rpack"
-    rpack_path.write_text(json.dumps(bundle, indent=2) + "\n")
+    attestation_path = CHAIN_DIR / f"issue-{issue}.sigstore.json"
+    pem_path = CHAIN_DIR / f"issue-{issue}.pub.pem"
+    try:
+        chain.append(finalize_block)
+        save_chain(issue, chain)
+
+        # Extract data from chain for the bundle
+        genesis = chain[0]
+        issue_data = genesis["data"]
+
+        # Collect artifacts, decisions, approvals, and evaluation data from
+        # chain. Artifacts are deduplicated per path keeping the latest
+        # record, so a re-edited file appears once, with the hash that
+        # matches disk at signing time (the full edit history stays in the
+        # chain).
+        artifacts_by_path: dict[str, dict] = {}
+        decisions = []
+        approvals = []
+        test_results = []
+        lint_results = []
+
+        for block in chain:
+            action = block["action"]
+            d = block["data"]
+            if action == "file-edit":
+                artifacts_by_path[d.get("path", "")] = {
+                    "path": d.get("path", ""),
+                    "operation": d.get("operation", ""),
+                    "sha256": d.get("sha256", ""),
+                }
+            elif action == "decision":
+                decisions.append({
+                    "context": d.get("context", ""),
+                    "choice": d.get("choice", ""),
+                    "rationale": d.get("rationale", ""),
+                })
+            elif action == "approval":
+                approvals.append({
+                    "gate": d.get("gate", ""),
+                    "decision": d.get("decision", ""),
+                    "note": d.get("note", ""),
+                    "approver": d.get("approver", ""),
+                })
+            elif action == "test-result":
+                test_results.append(d)
+            elif action == "lint-result":
+                lint_results.append(d)
+
+        artifacts = list(artifacts_by_path.values())
+
+        # Compute evaluation status
+        total_passed = sum(t.get("passed", 0) for t in test_results)
+        total_failed = sum(t.get("failed", 0) for t in test_results)
+        total_lint_errors = sum(l.get("errors", 0) for l in lint_results)
+
+        # Collect coverage and failure info
+        all_coverage = {}
+        for t in test_results:
+            for req_id, tests in t.get("coverage", {}).items():
+                all_coverage.setdefault(req_id, []).extend(tests)
+
+        all_reqs = issue_data.get("requirements", [])
+        req_ids = []
+        for r in all_reqs:
+            if isinstance(r, str) and ":" in r:
+                req_ids.append(r.split(":")[0].strip())
+            elif isinstance(r, dict):
+                req_ids.append(r.get("id", ""))
+
+        uncovered = [rid for rid in req_ids if rid not in all_coverage] if req_ids else []
+        failed_tests = []
+        for t in test_results:
+            failed_tests.extend(t.get("failed_tests", []))
+
+        if total_failed == 0 and total_lint_errors == 0 and not uncovered:
+            eval_status = "pass"
+        elif total_passed == 0 and total_failed > 0:
+            eval_status = "fail"
+        else:
+            eval_status = "partial"
+
+        coverage_pct = "0%"
+        if req_ids:
+            covered_count = len(req_ids) - len(uncovered)
+            coverage_pct = f"{round(covered_count / len(req_ids) * 100)}%"
+
+        # Get repo URL from gh if available
+        repo_url = ""
+        if shutil.which("gh"):
+            gh_result = run(["gh", "repo", "view", "--json", "url", "-q", ".url"])
+            if gh_result.returncode == 0:
+                repo_url = gh_result.stdout.strip()
+
+        # Build requirements list for bundle
+        bundle_reqs = []
+        for r in all_reqs:
+            if isinstance(r, str) and ":" in r:
+                rid, rtext = r.split(":", 1)
+                rid = rid.strip()
+                rtext = rtext.strip()
+            elif isinstance(r, dict):
+                rid = r.get("id", "")
+                rtext = r.get("text", "")
+            else:
+                continue
+            status = "covered" if rid in all_coverage else "uncovered"
+            bundle_reqs.append({
+                "id": rid,
+                "text": rtext,
+                "status": status,
+                "tests": all_coverage.get(rid, []),
+            })
+
+        # Assemble the bundle (without root_digest and signature yet)
+        bundle = {
+            "version": RPACK_VERSION,
+            "format": RPACK_FORMAT,
+            "issue": {
+                "number": issue_data.get("issue", int(issue)),
+                "title": issue_data.get("title", ""),
+                "url": f"{repo_url}/issues/{issue}" if repo_url else "",
+            },
+            "requirements": bundle_reqs,
+            "artifacts": artifacts,
+            "decisions": decisions,
+            "evaluation": {
+                "status": eval_status,
+                "tests_passed": total_passed,
+                "tests_failed": total_failed,
+                "lint_errors": total_lint_errors,
+                "requirement_coverage": coverage_pct,
+                "uncovered_requirements": uncovered,
+                "failed_tests": failed_tests,
+            },
+            "chain_hash": sha256_hex(chain_path(issue).read_text()),
+            "public_key": public_key,
+        }
+
+        # Attestation: a statement over the assembled bundle core, DSSE-signed
+        # with the same ephemeral key, embedded BEFORE root_digest is computed
+        # so the SSHSIG covers it (and pre-v1.3 verifiers hash it blindly via
+        # the denylist). Serialized to its canonical string ONCE — the sidecar
+        # must be byte-identical to canonical_json of the embedded copy.
+        statement = build_intoto_statement(bundle, chain, approvals, repo_url)
+        attestation_bundle = build_attestation(statement, attestation_signer)
+        attestation_canon = canonical_json(attestation_bundle)
+        bundle["attestation"] = attestation_bundle
+
+        # Compute root digest over the bundle content
+        root_digest = sha256_hex(canonical_json(bundle))
+        bundle["root_digest"] = root_digest
+
+        # Sign the root digest
+        bundle["signature"] = sign_ed25519(root_digest, key_path)
+
+        # Write the .rpack file, then the sidecars — all before the key
+        # deletion below (anything after it would operate on a deleted key).
+        CHAIN_DIR.mkdir(exist_ok=True)
+        rpack_path.write_text(json.dumps(bundle, indent=2) + "\n")
+
+        # Sidecar contracts: the .sigstore.json is the same canonical string
+        # as the embedded copy with NO newline characters at all, written with
+        # explicit encoding and newline="" so neither Python nor git can
+        # translate anything; the PEM is LF-only. Never copy save_chain or the
+        # rpack write above — both append "\n" with default translation.
+        attestation_path.write_text(attestation_canon,
+                                    encoding="utf-8", newline="")
+        pem_path.write_text(ed25519_spki_pem(attestation_signer.public_bytes),
+                            encoding="utf-8", newline="\n")
+    except BaseException as e:
+        chain_file.write_bytes(chain_before)
+        rpack_path.unlink(missing_ok=True)
+        attestation_path.unlink(missing_ok=True)
+        pem_path.unlink(missing_ok=True)
+        info("finalize failed after the chain was updated — chain file "
+             "restored, partial outputs removed")
+        if isinstance(e, (SystemExit, KeyboardInterrupt)):
+            raise
+        die(f"finalize failed while building outputs ({e}); chain restored, "
+            "ephemeral key retained — fix the cause and re-run finalize")
 
     # Delete ephemeral private key
     delete_private_key(key_path)
@@ -990,6 +1566,8 @@ def cmd_finalize(args: argparse.Namespace) -> None:
         "chain_length": len(chain),
         "artifacts_count": len(artifacts),
         "requirements_count": len(bundle_reqs),
+        "attestation_path": str(attestation_path),
+        "public_key_path": str(pem_path),
     }
     print(json.dumps(result, indent=2))
     info(f"Bundle written: {rpack_path}")
@@ -1017,7 +1595,60 @@ TAMPER_ERROR_MARKERS = (
     "Artifact tampered",
     "Artifact is not a file",
     "trailing or altered",
+    # v1.3 attestation invariants. These strings deliberately avoid the
+    # legacy "hash mismatch"/"prev_hash" fragments (substring matching), and
+    # "Attestation malformed" errors deliberately match NONE of these —
+    # signed-malformed content is an engine bug, not evidence of alteration.
+    "Attestation signature invalid",
+    "Attestation key mismatch",
+    "Attestation subjects",
+    "Attestation chain digest",
 )
+
+
+def _attestation_statement(att: Any) -> "tuple[dict | None, bytes | None, str]":
+    """Parse and shape-check an embedded attestation, returning
+    (statement, payload_bytes, problem) with problem == "" on success.
+
+    Every input byte is attacker-controlled, so every failure is a clean
+    description and never an exception — including the payload json parse,
+    which is a NEW json.loads over hostile bytes and carries the same guard
+    trio as read_json_file. Problem strings must never embed attacker values:
+    they feed error strings whose tamper classification is substring-based,
+    so embedded content could forge a tamper (or hide one)."""
+    if not isinstance(att, dict):
+        return None, None, "attestation is not an object"
+    env = att.get("dsseEnvelope")
+    if not isinstance(env, dict):
+        return None, None, "dsseEnvelope missing or not an object"
+    if env.get("payloadType") != DSSE_PAYLOAD_TYPE:
+        return None, None, "unexpected payloadType"
+    sigs = env.get("signatures")
+    if not isinstance(sigs, list) or len(sigs) != 1:
+        return None, None, "expected exactly one signature"
+    if not isinstance(sigs[0], dict) or not isinstance(sigs[0].get("sig"), str):
+        return None, None, "signature entry malformed"
+    payload_b64 = env.get("payload")
+    if not isinstance(payload_b64, str):
+        return None, None, "payload missing or not a string"
+    try:
+        payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+    except (ValueError, UnicodeEncodeError):
+        return None, None, "payload is not valid base64"
+    try:
+        statement = json.loads(payload.decode("utf-8"))
+    except (json.JSONDecodeError, ValueError, RecursionError,
+            UnicodeDecodeError):
+        return None, None, "payload is not valid JSON"
+    if not isinstance(statement, dict):
+        return None, None, "statement is not an object"
+    if statement.get("_type") != "https://in-toto.io/Statement/v1":
+        return None, None, "unexpected statement _type"
+    if statement.get("predicateType") != "https://slsa.dev/provenance/v1":
+        return None, None, "unexpected predicateType"
+    if not isinstance(statement.get("subject"), list) or not statement["subject"]:
+        return None, None, "subject missing or empty"
+    return statement, payload, ""
 
 
 def _render_verify_markdown(result: dict, bundle: dict,
@@ -1118,6 +1749,47 @@ def _render_verify_markdown(result: dict, bundle: dict,
               f"- Requirement coverage: "
               f"{md_cell(ev.get('requirement_coverage', 'n/a'))}"]
 
+    att_info = result.get("attestation")
+    att_info = att_info if isinstance(att_info, dict) else {}
+    if att_info.get("present"):
+        # Everything here is bundle-controlled and goes through md_cell —
+        # approver emails and notes land in PR comments.
+        lines += ["", "### Attestation", ""]
+        lines.append(f"- Predicate type: {md_cell(att_info.get('predicate_type'))}")
+        builder = att_info.get("builder")
+        builder = builder if isinstance(builder, dict) else {}
+        if isinstance(builder.get("id"), str):
+            lines.append(f"- Builder id: {md_cell(builder['id'])}")
+        model_obj = builder.get("model")
+        if isinstance(model_obj, dict):
+            lines.append(f"- Model (self-reported): "
+                         f"{md_cell(model_obj.get('id', ''))}")
+        plugin_obj = builder.get("plugin")
+        if isinstance(plugin_obj, dict):
+            lines.append(f"- Plugin version: "
+                         f"{md_cell(plugin_obj.get('version', ''))}")
+        lines.append(f"- Subjects: {md_cell(att_info.get('subject_count'))}")
+        lines.append(f"- Key id (verifier-derived): "
+                     f"{md_cell(att_info.get('key_id'))}")
+        approvals = att_info.get("approvals")
+        if isinstance(approvals, list) and approvals:
+            lines += ["", "**Approvals (agent-recorded — the AI asserts the "
+                          "human approved; not cryptographic proof of "
+                          "consent):**", ""]
+            for a in approvals:
+                if isinstance(a, dict):
+                    lines.append(f"- {md_cell(a.get('gate', ''))}: "
+                                 f"{md_cell(a.get('decision', ''))} — "
+                                 f"{md_cell(a.get('approver', '') or '(unknown)')} "
+                                 f"({md_cell(a.get('note', '') or 'no note')})")
+        issue_no = md_cell(binfo.get("issue"))
+        lines += ["", "Reproduce this check without ForgeProof (cosign):", "",
+                  "```",
+                  f"cosign verify-blob-attestation --key .forgeproof/issue-{issue_no}.pub.pem \\",
+                  f"  --bundle .forgeproof/issue-{issue_no}.sigstore.json \\",
+                  "  --type slsaprovenance1 --insecure-ignore-tlog <artifact-path>",
+                  "```"]
+
     lines += ["", "---",
               f"Strict mode: {'on' if result['strict'] else 'off'} · "
               f"Complete: {'yes' if result['complete'] else 'no'} · "
@@ -1170,20 +1842,27 @@ def cmd_verify(args: argparse.Namespace) -> None:
     anchor = resolve_verify_anchor(rpack_path, project_root)
     info(f"Verify anchor: {anchor}")
 
-    # 1. Check format and version
+    # 1. Check format and version. Version recognition is MEMBERSHIP in
+    # KNOWN_RPACK_VERSIONS — never equality with RPACK_VERSION and never an
+    # ordering — so every version this engine line has ever shipped verifies
+    # without a spurious warning, forever. The detail prints the BUNDLE's
+    # version: an audit report must describe the bundle it verified, not the
+    # verifier that ran.
     format_ok = bundle.get("format") == RPACK_FORMAT
-    version_ok = bundle.get("version") == RPACK_VERSION
+    version_known = bundle.get("version") in KNOWN_RPACK_VERSIONS
+    unknown_version_msg = (
+        f"Unknown bundle version: {bundle.get('version')} "
+        f"(known: {', '.join(sorted(KNOWN_RPACK_VERSIONS))})")
     if not format_ok:
         errors.append(f"Unknown format: {bundle.get('format')}")
-    if not version_ok:
-        warnings.append(f"Version mismatch: expected {RPACK_VERSION}, got {bundle.get('version')}")
+    if not version_known:
+        warnings.append(unknown_version_msg)
     if not format_ok:
         check("format", "fail", f"Unknown format: {bundle.get('format')}")
-    elif not version_ok:
-        check("format", "warn",
-              f"Version mismatch: expected {RPACK_VERSION}, got {bundle.get('version')}")
+    elif not version_known:
+        check("format", "warn", unknown_version_msg)
     else:
-        check("format", "ok", f"{RPACK_FORMAT} v{RPACK_VERSION}")
+        check("format", "ok", f"{RPACK_FORMAT} v{bundle.get('version')}")
 
     # 2. Verify root digest
     stored_digest = bundle.get("root_digest", "")
@@ -1387,6 +2066,159 @@ def cmd_verify(args: argparse.Namespace) -> None:
         check("coverage", "ok",
               f"requirement coverage {eval_info.get('requirement_coverage', 'n/a')}")
 
+    # 8. Attestation checks (v1.3, additive). An ABSENT attestation is
+    # silent: skipped status, zero errors, zero warnings, in every mode
+    # including --strict — no version implies its presence. And verify never
+    # touches the filesystem for attestation purposes: the embedded copy is
+    # inside root_digest; the sidecar is the one file no signature covers.
+    # These are INVARIANT checks over the signed payload, never a byte
+    # re-derivation of the statement (a future predicate change must not turn
+    # valid old bundles red).
+    attestation_summary: dict[str, Any] = {
+        "present": False, "predicate_type": None, "subject_count": None,
+        "key_id": None, "builder": None, "approvals": []}
+    if "attestation" not in bundle:
+        check("attestation", "skipped", "no attestation in bundle (pre-v1.3 format)")
+        check("attestation_signature", "skipped", "no attestation in bundle")
+        check("attestation_subjects", "skipped", "no attestation in bundle")
+    else:
+        attestation_summary["present"] = True
+        statement, att_payload, att_problem = _attestation_statement(
+            bundle["attestation"])
+        if att_problem:
+            # Root digest intact + malformed attestation = it was SIGNED
+            # malformed (an engine bug or hand-built statement), not altered
+            # afterwards — a plain error that matches no tamper marker.
+            errors.append(f"Attestation malformed: {att_problem}")
+            check("attestation", "fail", f"Attestation malformed: {att_problem}")
+            check("attestation_signature", "skipped",
+                  "not evaluated (attestation malformed)")
+            check("attestation_subjects", "skipped",
+                  "not evaluated (attestation malformed)")
+        else:
+            subject_list = statement["subject"]
+            predicate = statement.get("predicate")
+            predicate = predicate if isinstance(predicate, dict) else {}
+            build_def = predicate.get("buildDefinition")
+            build_def = build_def if isinstance(build_def, dict) else {}
+            run_details = predicate.get("runDetails")
+            run_details = run_details if isinstance(run_details, dict) else {}
+            internal = build_def.get("internalParameters")
+            internal = internal if isinstance(internal, dict) else {}
+            external = build_def.get("externalParameters")
+            external = external if isinstance(external, dict) else {}
+
+            attestation_summary["predicate_type"] = statement["predicateType"]
+            attestation_summary["subject_count"] = len(subject_list)
+            approvals_val = external.get("approvals")
+            attestation_summary["approvals"] = (
+                approvals_val if isinstance(approvals_val, list) else [])
+            builder_summary: dict[str, Any] = {}
+            rd_builder = run_details.get("builder")
+            if isinstance(rd_builder, dict) and isinstance(rd_builder.get("id"), str):
+                builder_summary["id"] = rd_builder["id"]
+            internal_builder = internal.get("builder")
+            if isinstance(internal_builder, dict):
+                builder_summary.update(internal_builder)
+            attestation_summary["builder"] = builder_summary or None
+            check("attestation", "ok",
+                  f"in-toto statement, {len(subject_list)} subject(s)")
+
+            # 9. DSSE signature, verified against the bundle's OWN
+            # ssh-ed25519 key — never against key material carried inside the
+            # attestation, which would prove nothing. This binding is the
+            # payoff of signing both tiers with one key.
+            dsse_key = None
+            if isinstance(public_key, str):
+                try:
+                    dsse_key = ssh_ed25519_pubkey_bytes(public_key)
+                except ValueError:
+                    dsse_key = None
+            if dsse_key is None:
+                errors.append("Attestation key mismatch: bundle public_key is "
+                              "not a parseable ssh-ed25519 key")
+                check("attestation_signature", "fail",
+                      "bundle public_key is not a parseable ssh-ed25519 key")
+            else:
+                attestation_summary["key_id"] = base64.b64encode(
+                    hashlib.sha256(ED25519_SPKI_PREFIX + dsse_key).digest()
+                ).decode("ascii")
+                env = bundle["attestation"]["dsseEnvelope"]
+                try:
+                    dsse_sig = base64.b64decode(
+                        env["signatures"][0]["sig"].encode("ascii"),
+                        validate=True)
+                except (ValueError, UnicodeEncodeError):
+                    dsse_sig = b""
+                pae = dsse_pae(env["payloadType"], att_payload)
+                if ed25519_verify(dsse_key, pae, dsse_sig):
+                    check("attestation_signature", "ok",
+                          "DSSE signature valid under the bundle's own key")
+                else:
+                    errors.append(
+                        "Attestation signature invalid: DSSE signature does "
+                        "not verify under the bundle's key")
+                    check("attestation_signature", "fail",
+                          "DSSE signature does not verify under the bundle's key")
+
+            # 10. Subjects equal the bundle's artifact set exactly (or the
+            # single chain descriptor for a zero-artifact bundle), and the
+            # chain byproduct digest equals the SEALED chain_hash — compared,
+            # never recomputed (LF-normalization, finding 8).
+            subj_problem = ""
+            actual_subjects = set()
+            for s in subject_list:
+                if (not isinstance(s, dict)
+                        or not isinstance(s.get("name"), str)
+                        or not isinstance(s.get("digest"), dict)
+                        or not isinstance(s["digest"].get("sha256"), str)):
+                    subj_problem = "subject entry malformed"
+                    break
+                actual_subjects.add((s["name"], s["digest"]["sha256"]))
+            bundle_artifacts = bundle.get("artifacts")
+            expected_subjects = set()
+            if isinstance(bundle_artifacts, list) and bundle_artifacts:
+                for a in bundle_artifacts:
+                    if isinstance(a, dict):
+                        expected_subjects.add(
+                            (str(a.get("path", "")), str(a.get("sha256", ""))))
+            else:
+                expected_subjects.add(
+                    (f".forgeproof/chain-{issue_num}.json",
+                     str(bundle.get("chain_hash", ""))))
+            chain_byproduct = None
+            byproducts = run_details.get("byproducts")
+            for b in (byproducts if isinstance(byproducts, list) else []):
+                if (isinstance(b, dict)
+                        and b.get("name") == f".forgeproof/chain-{issue_num}.json"):
+                    chain_byproduct = b
+                    break
+            if subj_problem:
+                errors.append(f"Attestation malformed: {subj_problem}")
+                check("attestation_subjects", "fail",
+                      f"Attestation malformed: {subj_problem}")
+            elif actual_subjects != expected_subjects:
+                errors.append(
+                    "Attestation subjects do not match the bundle's artifacts")
+                check("attestation_subjects", "fail",
+                      "subject set does not equal the bundle's artifact set")
+            elif (not isinstance(chain_byproduct, dict)
+                    or not isinstance(chain_byproduct.get("digest"), dict)
+                    or not isinstance(chain_byproduct["digest"].get("sha256"), str)):
+                errors.append(
+                    "Attestation malformed: chain byproduct descriptor missing")
+                check("attestation_subjects", "fail",
+                      "chain byproduct descriptor missing")
+            elif chain_byproduct["digest"]["sha256"] != bundle.get("chain_hash"):
+                errors.append(
+                    "Attestation chain digest does not match the sealed chain_hash")
+                check("attestation_subjects", "fail",
+                      "chain byproduct digest does not match the sealed chain_hash")
+            else:
+                check("attestation_subjects", "ok",
+                      f"{len(actual_subjects)} subject(s) match the bundle; "
+                      "chain byproduct matches the sealed chain_hash")
+
     # Bundle summary (recorded claims + chain metadata when available)
     commit_sha = None
     first_timestamp = last_timestamp = None
@@ -1432,6 +2264,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
         "complete": complete,
         "checks": checks,
         "bundle": bundle_summary,
+        "attestation": attestation_summary,
     }
     if out_format == "markdown":
         print(_render_verify_markdown(result, bundle, chain_blocks, artifact_rows))
@@ -1471,6 +2304,10 @@ def cmd_summary(args: argparse.Namespace) -> None:
     except (KeyError, TypeError):
         die(f"bundle is missing required fields (corrupt or not a ForgeProof "
             f"bundle): {rpack_path}")
+
+    # Additive v1.3 key, read OUTSIDE the required-field guard above: a
+    # pre-v1.3 bundle without it must never be declared corrupt.
+    attestation = bundle.get("attestation")
 
     # Status emoji
     status_badge = {"pass": "PASS", "partial": "PARTIAL", "fail": "FAIL"}.get(status, "UNKNOWN")
@@ -1512,6 +2349,19 @@ def cmd_summary(args: argparse.Namespace) -> None:
     ])
     for a in artifacts:
         lines.append(f"- `{a['path']}` ({a['operation']})")
+
+    if isinstance(attestation, dict):
+        lines.extend([
+            "",
+            "### Attestation",
+            "",
+            f"- Sigstore bundle: `.forgeproof/issue-{issue}.sigstore.json`",
+            f"- Public key (SPKI PEM): `.forgeproof/issue-{issue}.pub.pem`",
+            "- Verify without ForgeProof (optional): "
+            f"`cosign verify-blob-attestation --key .forgeproof/issue-{issue}.pub.pem "
+            f"--bundle .forgeproof/issue-{issue}.sigstore.json "
+            "--type slsaprovenance1 --insecure-ignore-tlog <artifact-path>`",
+        ])
 
     lines.extend([
         "",
@@ -1675,6 +2525,14 @@ def cmd_reset(args: argparse.Namespace) -> None:
             for f in CHAIN_DIR.glob("issue-*.rpack"):
                 f.unlink()
                 deleted.append(str(f))
+            # Attestation sidecars: two NAMED globs, never a broad issue-*
+            # (which would also eat unrelated files someone parked there).
+            for f in CHAIN_DIR.glob("issue-*.sigstore.json"):
+                f.unlink()
+                deleted.append(str(f))
+            for f in CHAIN_DIR.glob("issue-*.pub.pem"):
+                f.unlink()
+                deleted.append(str(f))
         # Clean up temp keys
         tmpdir = Path(tempfile.gettempdir())
         for f in tmpdir.glob("forgeproof_*_ed25519*"):
@@ -1690,6 +2548,14 @@ def cmd_reset(args: argparse.Namespace) -> None:
         if rpack.exists():
             rpack.unlink()
             deleted.append(str(rpack))
+        attestation = CHAIN_DIR / f"issue-{issue}.sigstore.json"
+        if attestation.exists():
+            attestation.unlink()
+            deleted.append(str(attestation))
+        pem = CHAIN_DIR / f"issue-{issue}.pub.pem"
+        if pem.exists():
+            pem.unlink()
+            deleted.append(str(pem))
         # Clean up ephemeral key
         key = Path(tempfile.gettempdir()) / f"forgeproof_{issue}_ed25519"
         key.unlink(missing_ok=True)
@@ -1819,7 +2685,8 @@ class _RemovedDataFlag(argparse.Action):
             "file-edit --path --operation (sha256 is computed by the engine) | "
             "decision --context --choice --rationale | "
             "test-result --suite --passed --failed [--covers 'REQ-1=test_a,test_b'] [--failed-test NAME] | "
-            "lint-result --tool --errors --warnings"
+            "lint-result --tool --errors --warnings | "
+            "approval --gate --decision [--note]"
         )
 
 
@@ -1876,11 +2743,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tool", help="[lint-result] Linter name")
     p.add_argument("--errors", type=int, help="[lint-result] Error count")
     p.add_argument("--warnings", type=int, help="[lint-result] Warning count")
+    # approval
+    p.add_argument("--gate", help="[approval] Gate the human approved (e.g. plan)")
+    p.add_argument("--decision",
+                   choices=["approved", "rejected", "changes-requested"],
+                   help="[approval] Human decision at the gate")
+    p.add_argument("--note", help="[approval] Optional approval note")
 
     # finalize
     p = sub.add_parser("finalize", help="Finalize chain and build .rpack")
     p.add_argument("--issue", required=True, help="Issue number")
     p.add_argument("--commit", required=True, help="Commit SHA")
+    p.add_argument("--model",
+                   help="Model id the agent reports it is running as "
+                        "(recorded self-reported in the builder identity)")
 
     # verify
     p = sub.add_parser("verify", help="Verify a .rpack bundle")

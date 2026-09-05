@@ -82,7 +82,7 @@ Propose an implementation plan:
 - How each requirement maps to specific changes
 - What tests will be written
 
-**STOP and present the plan to the user. Wait for approval before proceeding.** The user may adjust the plan, add constraints, or reject parts of it. This is a conversation, not an automated pipeline.
+**STOP and present the plan to the user. Wait for approval before proceeding.** The user may adjust the plan, add constraints, or reject parts of it. This is a conversation, not an automated pipeline. The decision is recorded into the chain right after `init` in Phase 2 (the chain has to exist first).
 
 ## Phase 2 — Generate
 
@@ -105,6 +105,18 @@ Initialize the provenance chain (repeat `--requirement` once per requirement):
 The `--force` flag safely handles re-runs by cleaning up any prior chain for
 this issue. Pass the title and each requirement as ordinary quoted arguments —
 there is no JSON to escape, so titles containing quotes are safe.
+
+Immediately after `init`, record the plan approval the user gave at the
+Phase 1 gate (the engine fills the approver identity from
+`git config user.email` — do not pass it):
+```
+"$FP_PY" "$FP" record --issue $ISSUE --action approval --gate plan --decision approved --note "<one line stating what was approved>"
+```
+If the user rejected the plan or asked for changes at the gate, record
+`--decision rejected` or `--decision changes-requested` with a note, revise,
+and record a fresh approval once they accept. Approvals must be recorded
+BEFORE `finalize` — the chain refuses all appends afterwards — and they are
+sealed into the bundle's attestation as agent-recorded evidence.
 
 Check for an existing local branch and clean up if needed:
 ```
@@ -197,17 +209,27 @@ git commit -m "forgeproof(#$ISSUE): <concise description>"
 The file list comes from the `file-edit` records you made during Phase 2. Stage each
 file path that appeared in a `--action file-edit --path ...` call.
 
-Finalize the chain and build the `.rpack` bundle:
+Finalize the chain and build the `.rpack` bundle. For `--model`, state the
+model id you are actually running as (from your own system context) — it is
+recorded as *self-reported* builder identity, so report it honestly and never
+guess another model's name:
 ```
-"$FP_PY" "$FP" finalize --issue $ISSUE --commit $(git rev-parse HEAD)
+"$FP_PY" "$FP" finalize --issue $ISSUE --commit $(git rev-parse HEAD) --model "<model-id>"
 ```
 
 This command:
 - Re-checks every recorded file against disk — if any file changed after it
   was recorded, finalize refuses to sign and names the stale paths; record
   the current state of each named file (`--action file-edit`) and re-run
-- Adds a finalize block to the chain
-- Builds the `.rpack` bundle with all artifacts, requirements, decisions, and evaluation data
+- Adds a finalize block to the chain (carrying the builder identity: model,
+  Claude Code version, plugin version)
+- Builds the `.rpack` bundle with all artifacts, requirements, decisions,
+  approvals, and evaluation data
+- Builds an in-toto Statement v1 / SLSA Provenance v1 attestation, DSSE-signed
+  with the same ephemeral key, embeds it in the `.rpack`, and exports it as
+  `.forgeproof/issue-$ISSUE.sigstore.json` with the key as
+  `.forgeproof/issue-$ISSUE.pub.pem` (verifiable with plain cosign — no
+  ForgeProof code needed)
 - Signs the bundle with the ephemeral Ed25519 key
 - Deletes the private key
 
@@ -218,6 +240,9 @@ Commit them as a second, plain commit:
 git add .forgeproof/ && git commit -m "forgeproof(#$ISSUE): seal provenance bundle"
 ```
 Confirm with `git cat-file -e HEAD:.forgeproof/issue-$ISSUE.rpack` (must exit 0).
+The attestation sidecars need NO extra step: `git add .forgeproof/` already
+stages `issue-$ISSUE.sigstore.json` and `issue-$ISSUE.pub.pem`, and
+`.gitignore` does not exclude them — do not add special handling for them.
 Do NOT use `--amend`: finalize recorded `commit_sha` as the work commit's SHA,
 and amending would replace that commit with a new SHA, orphaning the recorded
 linkage — the same class of break as the documented post-rebase mismatch.
@@ -228,11 +253,20 @@ Report the result to the user. Include:
 - The path to the `.rpack` file, and that it is committed on the branch — the
   branch ends in two commits: the work commit the bundle references, then the
   seal commit that carries the bundle
+- That the bundle carries a standards-conformant in-toto/SLSA attestation
+  (with the recorded plan approval inside), exported at
+  `.forgeproof/issue-$ISSUE.sigstore.json` and verifiable with cosign alone
 - Next step: run `/forgeproof:push` to create a PR, or `/forgeproof:verify` to verify the bundle
 
 ## Reference Documentation
 
 Detailed specifications are in `references/`:
-- `chain-format.md` — Hash chain block format and action types
-- `rpack-format.md` — `.rpack` bundle JSON schema
+- `chain-format.md` — Hash chain block format and action types (including
+  `approval` and the finalize block's builder identity)
+- `rpack-format.md` — `.rpack` bundle JSON schema, format v1.1.0, and the
+  embedded attestation + sidecar contracts
 - `toolchain-detection.md` — Supported languages and detection logic
+
+Repo-level docs: `docs/cosign-interop.md` (verifying the attestation with
+plain cosign) and `docs/compliance-mapping.md` (SSDF / CISA-form and EU CRA
+mapping, with the honest limits).

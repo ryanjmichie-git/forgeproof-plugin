@@ -98,6 +98,7 @@ Closes #$ISSUE
 bundle in `.forgeproof/` is a cryptographically signed provenance record.
 Run `/forgeproof:verify .forgeproof/issue-$ISSUE.rpack` to verify integrity.*
 *The bundle can be verified automatically on PRs with the [forgeproof-verify GitHub Action](https://github.com/ryanjmichie-git/forgeproof-verify).*
+*It also carries an in-toto/SLSA attestation (`.forgeproof/issue-$ISSUE.sigstore.json`) verifiable with cosign alone — see [docs/cosign-interop.md](https://github.com/ryanjmichie-git/forgeproof-plugin/blob/main/docs/cosign-interop.md).*
 ```
 
 ## Step 5 — Create PR

@@ -163,6 +163,13 @@ def lifecycle(rec: Recorder, scenario: str, interp_name: str, exe: str,
         p = engine(exe, ["record", "--issue", issue, "--action", "lint-result",
                          "--tool", "stub", "--errors", "0", "--warnings", "0"], proj)
         expect(p.returncode == 0, f"lint-result rc={p.returncode}")
+        # v1.3: approval via the real CLI. The approver comes from git config
+        # (may legitimately be "" on a bare runner) — the record must succeed
+        # either way, never block on identity lookup.
+        p = engine(exe, ["record", "--issue", issue, "--action", "approval",
+                         "--gate", "plan", "--decision", "approved",
+                         "--note", 'approved the "plan" at the gate'], proj)
+        expect(p.returncode == 0, f"approval rc={p.returncode}: {p.stderr[:200]}")
     c("record: every action type via flags", do_records)
 
     target = proj / artifacts[0]
@@ -196,12 +203,33 @@ def lifecycle(rec: Recorder, scenario: str, interp_name: str, exe: str,
     c("finalize: refuses missing artifact", do_recheck_missing)
 
     def do_finalize():
-        p = engine(exe, ["finalize", "--issue", issue, "--commit", "1" * 40], proj)
+        start = time.monotonic()
+        p = engine(exe, ["finalize", "--issue", issue, "--commit", "1" * 40,
+                         "--model", "stress-harness"], proj)
+        elapsed = time.monotonic() - start
         expect(p.returncode == 0, f"finalize rc={p.returncode}: {p.stderr[:300]}")
         out = parse_json(p.stdout, "finalize")
         expect(out["evaluation_status"] == "pass", f"status={out['evaluation_status']}")
         expect(rpack_path.exists(), "rpack not written")
-    c("finalize: signs clean state", do_finalize)
+        # v1.3: pure-python DSSE signing must stay far inside the anti-hang net
+        expect(elapsed < 60, f"finalize took {elapsed:.1f}s — signing too slow")
+        # v1.3: attestation sidecars + the emission byte-identity invariant
+        sidecar = proj / ".forgeproof" / f"issue-{issue}.sigstore.json"
+        pem = proj / ".forgeproof" / f"issue-{issue}.pub.pem"
+        expect(sidecar.exists() and pem.exists(),
+               "attestation sidecars not written")
+        expect(str(out.get("attestation_path", "")).endswith(
+            f"issue-{issue}.sigstore.json"),
+            "finalize result lacks attestation_path")
+        bundle = json.loads(rpack_path.read_text(encoding="utf-8"))
+        canon = json.dumps(bundle["attestation"], sort_keys=True,
+                           separators=(",", ":")).encode("utf-8")
+        raw = sidecar.read_bytes()
+        expect(raw == canon,
+               "sidecar bytes are not the canonical embedded attestation")
+        expect(b"\n" not in raw and b"\r" not in raw,
+               "sidecar contains newline bytes")
+    c("finalize: signs clean state, emits byte-exact sidecars", do_finalize)
 
     def do_verify_green():
         p = engine(exe, ["verify", "--rpack",
@@ -344,6 +372,32 @@ def lifecycle(rec: Recorder, scenario: str, interp_name: str, exe: str,
         "Root digest mismatch",
     )
 
+    def mutate_attestation():
+        bundle = json.loads(rpack_bytes.decode("utf-8"))
+        bundle["attestation"]["mediaType"] = "application/x-tampered"
+        rpack_path.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
+    tamper_case(
+        "tamper: attestation field edit -> red (root digest covers it)",
+        mutate_attestation,
+        lambda: rpack_path.write_bytes(rpack_bytes),
+        "Root digest mismatch",
+    )
+
+    def do_sidecar_reformat_safe():
+        # verify performs ZERO filesystem reads for attestation purposes: a
+        # reformatted (or garbage) sidecar must not affect the .rpack verdict.
+        sidecar = proj / ".forgeproof" / f"issue-{issue}.sigstore.json"
+        saved = sidecar.read_bytes()
+        sidecar.write_bytes(b'{"reformatted": true}\n')
+        try:
+            p = engine(exe, ["verify", "--strict", "--rpack",
+                             str(rpack_path.relative_to(proj))], proj)
+            expect(p.returncode == 0,
+                   f"a reformatted sidecar turned verify red: {p.stdout[:200]}")
+        finally:
+            sidecar.write_bytes(saved)
+    c("verify: never reads the sidecar (reformat-safe)", do_sidecar_reformat_safe)
+
     if check_summary_encoding:
         def do_summary():
             p = engine(exe, ["summary", "--issue", issue], proj)
@@ -356,9 +410,15 @@ def lifecycle(rec: Recorder, scenario: str, interp_name: str, exe: str,
         c("summary: renders, UTF-8 clean", do_summary)
 
     def do_cleanup():
+        sidecar = proj / ".forgeproof" / f"issue-{issue}.sigstore.json"
+        pem = proj / ".forgeproof" / f"issue-{issue}.pub.pem"
         p = engine(exe, ["reset", "--issue", issue], proj)
         expect(p.returncode == 0, "reset failed")
-    c("reset: cleans own state", do_cleanup)
+        expect(not chain_path.exists() and not rpack_path.exists(),
+               "reset left the chain or rpack behind")
+        expect(not sidecar.exists() and not pem.exists(),
+               "reset left attestation sidecars behind")
+    c("reset: cleans own state incl. sidecars", do_cleanup)
 
 
 # ---------------------------------------------------------------------------

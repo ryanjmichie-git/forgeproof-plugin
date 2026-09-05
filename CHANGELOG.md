@@ -2,6 +2,104 @@
 
 All notable changes to ForgeProof are documented in this file.
 
+## [1.3.0] - 2026-08-15
+
+"Speak the industry's language." Every bundle now *also* carries a
+standards-conformant attestation — an in-toto Statement v1 with a SLSA
+Provenance v1 predicate, DSSE-signed inside a Sigstore bundle by the same
+ephemeral Ed25519 key that signs the chain — verifiable with plain cosign and
+no ForgeProof code present. Still pure stdlib; cosign is consumer-side only.
+
+The bundle **format version bumped, for the first time, to 1.1.0 —
+additively**. Every prior `.rpack` still verifies with zero errors *and zero
+warnings*, strict mode included, enforced in CI by three frozen fixtures
+(v1.0.1, v1.1.0, v1.2.2 engines). In the reverse direction, a v1.1.0 bundle
+verified by a **pre-v1.3 verifier is green with exactly one benign warning**
+("Version mismatch: expected 1.0.0, got 1.1.0") — expected behavior, not a
+failure.
+
+### Added
+
+- **Pure-stdlib RFC 8032 Ed25519** (sign/verify/public-from-seed), locked to
+  the RFC's own test vectors and hardened for hostile input: `s >= L`
+  malleability, non-canonical (`y >= p`), non-square, invalid-sign-bit, and
+  wrong-length encodings are all rejected without raising. OpenSSH
+  `openssh-key-v1` seed extraction dies actionably on encrypted, foreign, or
+  truncated keys and refuses to sign if the derived public key does not match
+  the embedded blob.
+- **Attestation emission in `finalize`.** Subjects are the deduplicated
+  artifacts (a zero-edit run attests the chain itself); the predicate carries
+  the issue, requirements, **human approval events**, builder identity with
+  per-field provenance labels (model `self-reported` via the new `--model`
+  flag, Claude Code version `measured`, plugin version `engine-constant`),
+  the base branch as a resolved dependency, and the chain byproduct reusing
+  the sealed LF-normalized `chain_hash`. Embedded under a new top-level
+  `attestation` key — inside `root_digest`, so the SSHSIG covers it — and
+  exported byte-identically as `.forgeproof/issue-N.sigstore.json` with the
+  key as `issue-N.pub.pem`; the ordinary seal commit stages both. The DSSE
+  layout (exactly one keyid-free signature, empty `publicKey` identifier) is
+  the one both pinned cosign binaries verify.
+- **`approval` chain action** (`--gate`, `--decision
+  approved|rejected|changes-requested`, `--note`), recorded by the run skill
+  at the plan gate. The engine fills `approver` from `git config user.email`
+  itself — never from a flag — degrading to `""` rather than blocking.
+  Labeled `evidence: agent-recorded` in the predicate: the AI asserts the
+  human approved; it is not cryptographic proof of consent.
+- **Three additive verify checks**: `attestation` (statement/envelope
+  well-formed, hostile payloads fail cleanly), `attestation_signature` (DSSE
+  verifies under the bundle's **own** ssh-ed25519 key — the key binding is
+  the point), `attestation_subjects` (signed subjects equal the bundle's
+  artifacts; chain byproduct equals the sealed `chain_hash`, compared never
+  recomputed). An absent attestation is **silent**: `skipped`, zero errors,
+  zero warnings, in every mode including `--strict`. Real alteration is
+  tamper-class; a signed-malformed attestation is VERIFICATION FAILED, never
+  TAMPER. New additive result key `attestation` and a markdown report
+  section with the exact cosign reproduction command.
+- **Required `cosign-interop` CI job**: builds a real bundle with the actual
+  engine and verifies it with **two exactly-pinned cosign binaries (v2.6.5
+  and v3.1.3)** — one run per artifact with cosign hashing the file itself
+  (never fed the attestation's own digest, which is vacuous for tamper), a
+  `--digest` run recomputed from disk, and tampered-artifact plus
+  tampered-envelope cases proven red.
+- **`docs/cosign-interop.md`** (the exact tested recipe and its pitfalls) and
+  **`docs/compliance-mapping.md`** (SSDF/CISA-form and EU CRA mapping as of
+  2026, with the honest limits: fields required at SLSA Build L1 — no level
+  claim; approvals agent-recorded; model self-reported; no compliance
+  conferred).
+
+### Changed
+
+- **`finalize` is transactional.** The signing seed is parsed and bound to
+  the published public key *before* any chain mutation, and everything after
+  the chain save runs under a rollback guard: on any failure the chain file
+  is restored byte-for-byte, partial outputs are removed, and the ephemeral
+  key is retained so the run can simply be re-run.
+- **Version recognition is membership, not equality.** `verify` accepts any
+  version in `KNOWN_RPACK_VERSIONS` (append-only, membership-only, never an
+  ordering) with no warning, and the format check's detail now names the
+  *bundle's* version — an audit report describes the bundle, not the
+  verifier. Unknown versions warn, exactly as before.
+- `reset`, `init --force`, and `summary` know the attestation sidecars
+  (cleanup, stale-sidecar removal, and a summary section with the cosign
+  command). The PR gate and lint hook are **deliberately unchanged**:
+  attestation-unaware, same budgets, same globs — verified by test.
+- `PRIVACY.md` **corrects a live inaccuracy**: the bundle has always carried
+  `username@hostname` in the ssh-keygen public-key comment, so the "no
+  personal information" claim was false before v1.3.0 existed. It now states
+  that plainly and documents the new approver-email field and sidecar files.
+- **PR gate on the authoritative CI check re-pinned.** The dogfood workflow and
+  the consumer recipe (`README.md`, `docs/branch-protection.md`) now pin
+  `forgeproof-verify` **v1.1.0** (commit `6101dd7`), which vendors this
+  v1.3.0 engine — so the authoritative PR check runs the three attestation
+  checks and exposes an additive `attestation` output, while frozen v1.0.x,
+  v1.1.x, and v1.2.x bundles still pass it with zero warnings.
+
+### Compatibility
+
+- Hooks (`hooks/hooks.json`) byte-identical; no new preflight requirements —
+  cosign is never required for anything.
+- Engine remains a single stdlib-only file; the only new import is `base64`.
+
 ## [1.2.2] - 2026-07-17
 
 Hardening follow-up to v1.2.1's require-signature fix, from a second independent

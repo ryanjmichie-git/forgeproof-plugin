@@ -28,6 +28,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 FORGEPROOF_PY = SCRIPT_DIR / "forgeproof.py"
 FIXTURE_V101 = SCRIPT_DIR / "fixtures" / "v101"
 FIXTURE_V110 = SCRIPT_DIR / "fixtures" / "v110"
+FIXTURE_V122 = SCRIPT_DIR / "fixtures" / "v122"
 
 spec = importlib.util.spec_from_file_location("forgeproof", FORGEPROOF_PY)
 fp = importlib.util.module_from_spec(spec)
@@ -800,26 +801,34 @@ class TestCmdReset:
     def test_reset_single_issue(self, tmp_chain_dir, capsys):
         (tmp_chain_dir / "chain-5.json").write_text("[]")
         (tmp_chain_dir / "issue-5.rpack").write_text("{}")
+        (tmp_chain_dir / "issue-5.sigstore.json").write_text("{}")
+        (tmp_chain_dir / "issue-5.pub.pem").write_text("PEM")
 
         fp.cmd_reset(self._make_args(issue="5"))
 
         assert not (tmp_chain_dir / "chain-5.json").exists()
         assert not (tmp_chain_dir / "issue-5.rpack").exists()
+        assert not (tmp_chain_dir / "issue-5.sigstore.json").exists()
+        assert not (tmp_chain_dir / "issue-5.pub.pem").exists()
         output = json.loads(capsys.readouterr().out)
-        assert output["count"] == 2
+        assert output["count"] == 4
 
     def test_reset_all(self, tmp_chain_dir, capsys):
         (tmp_chain_dir / "chain-1.json").write_text("[]")
         (tmp_chain_dir / "chain-2.json").write_text("[]")
         (tmp_chain_dir / "issue-1.rpack").write_text("{}")
+        (tmp_chain_dir / "issue-1.sigstore.json").write_text("{}")
+        (tmp_chain_dir / "issue-2.pub.pem").write_text("PEM")
 
         fp.cmd_reset(self._make_args(all_flag=True))
 
         assert not (tmp_chain_dir / "chain-1.json").exists()
         assert not (tmp_chain_dir / "chain-2.json").exists()
         assert not (tmp_chain_dir / "issue-1.rpack").exists()
+        assert not (tmp_chain_dir / "issue-1.sigstore.json").exists()
+        assert not (tmp_chain_dir / "issue-2.pub.pem").exists()
         output = json.loads(capsys.readouterr().out)
-        assert output["count"] == 3
+        assert output["count"] == 5
 
     def test_reset_nonexistent_issue(self, tmp_chain_dir, capsys):
         fp.cmd_reset(self._make_args(issue="999"))
@@ -1052,10 +1061,16 @@ class TestFinalizeRecheck:
     def _finalize(self, issue, priv):
         args = fp.build_parser().parse_args(
             ["finalize", "--issue", issue, "--commit", "0" * 40])
+        # load_attestation_signer is patched with a REAL signer from a fixed
+        # seed (this class feeds finalize a literal fake_private file the
+        # OpenSSH parser would rightly reject); everything downstream —
+        # statement build, DSSE signing, sidecar writes — still runs for real.
         with patch.object(fp, "get_key_path", return_value=priv), \
              patch.object(fp, "sign_ed25519", return_value="sig"), \
              patch.object(fp, "delete_private_key"), \
              patch.object(fp.shutil, "which", return_value=None), \
+             patch.object(fp, "load_attestation_signer",
+                          return_value=fp.EphemeralEd25519Signer(bytes(32))), \
              patch("sys.stdout"):
             fp.cmd_finalize(args)
 
@@ -1837,7 +1852,7 @@ class TestSkillContract:
                     if e.code not in (0, None):
                         failures.append(f"{skill_md.parent.name}: {line}")
         capsys.readouterr()  # swallow argparse usage noise
-        assert checked >= 13, (
+        assert checked >= 17, (
             f"only {checked} engine invocations found across SKILL.md files — "
             "the extractor is broken or the skills no longer document the engine"
         )
@@ -2035,6 +2050,35 @@ class TestV101Compat:
                    for e in strict_output["errors"])
         assert strict_output["complete"] is False
 
+    def test_attestation_skipped_silent_and_format_names_bundle_version(
+            self, tmp_path, monkeypatch, capsys):
+        """v1.3 forever-contract additions: an absent attestation is SILENT —
+        all three attestation checks skipped, zero errors, zero warnings — in
+        lenient AND strict mode, and the format check's detail names the
+        BUNDLE's version, never the verifier's. Shared across all three frozen
+        fixture classes via method aliasing."""
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        for strict in (False, True):
+            args = MagicMock()
+            args.rpack = str(rpack)
+            args.strict = strict
+            with pytest.raises(SystemExit) as exc_info:
+                fp.cmd_verify(args)
+            code = exc_info.value.code
+            output = json.loads(capsys.readouterr().out)
+            assert (0 if code is None else code) == 0
+            assert output["errors"] == []
+            assert output["warnings"] == []
+            statuses = {c["name"]: c["status"] for c in output["checks"]}
+            assert statuses["attestation"] == "skipped"
+            assert statuses["attestation_signature"] == "skipped"
+            assert statuses["attestation_subjects"] == "skipped"
+            fmt = [c for c in output["checks"] if c["name"] == "format"][0]
+            assert fmt["status"] == "ok"
+            assert "1.0.0" in fmt["detail"]
+
 
 # ---------------------------------------------------------------------------
 # v1.1.0 compatibility (forever contract — ROADMAP Principle 1)
@@ -2052,6 +2096,9 @@ class TestV110Compat:
     # verbatim so both forever contracts stay behaviourally identical.
     _require_sshkeygen = TestV101Compat._require_sshkeygen
     _verify = TestV101Compat._verify
+    test_attestation_skipped_silent_and_format_names_bundle_version = (
+        TestV101Compat
+        .test_attestation_skipped_silent_and_format_names_bundle_version)
 
     def _deploy(self, tmp_path):
         """Lay the fixture out the way a real checkout looks: chain and bundle
@@ -2169,6 +2216,166 @@ class TestV110Compat:
         assert output["complete"] is True
 
     def test_v110_strict_fails_when_artifact_removed(
+            self, tmp_path, monkeypatch, capsys):
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        bundle = json.loads(rpack.read_text(encoding="utf-8"))
+        [artifact] = bundle["artifacts"]
+        (tmp_path / artifact["path"]).unlink()
+        monkeypatch.chdir(tmp_path)
+        # lenient stays green (forever contract untouched)
+        code, output = self._verify(rpack, capsys)
+        assert code == 0
+        assert output["verified"] is True
+        assert output["artifacts_missing"] == 1
+        # strict goes red on the missing evidence
+        args = fp.build_parser().parse_args(
+            ["verify", "--rpack", str(rpack), "--strict"])
+        with pytest.raises(SystemExit) as exc_info:
+            fp.cmd_verify(args)
+        strict_code = exc_info.value.code
+        strict_output = json.loads(capsys.readouterr().out)
+        assert (0 if strict_code is None else strict_code) == 1
+        assert strict_output["verified"] is False
+        assert any(e.startswith("[strict] Artifact not found")
+                   for e in strict_output["errors"])
+        assert strict_output["complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# v1.2.2 compatibility (forever contract — ROADMAP Principle 1)
+# ---------------------------------------------------------------------------
+
+
+class TestV122Compat:
+    """The checked-in fixture bundle was generated by the unmodified v1.2.2
+    engine — the last pre-attestation bundle format. Any `.rpack` ever signed
+    must verify with every future version of the verifier — this test must
+    never be weakened and the fixture must never be regenerated. If a change
+    breaks it, the change is wrong.
+    """
+
+    # Same capability gate and verify driver as TestV101Compat — reused
+    # verbatim so all forever contracts stay behaviourally identical.
+    _require_sshkeygen = TestV101Compat._require_sshkeygen
+    _verify = TestV101Compat._verify
+    test_attestation_skipped_silent_and_format_names_bundle_version = (
+        TestV101Compat
+        .test_attestation_skipped_silent_and_format_names_bundle_version)
+
+    def _deploy(self, tmp_path):
+        """Lay the fixture out the way a real checkout looks: chain and bundle
+        under .forgeproof/, artifact at its recorded relative path."""
+        chain_dir = tmp_path / ".forgeproof"
+        chain_dir.mkdir()
+        shutil.copyfile(FIXTURE_V122 / "chain-997.json", chain_dir / "chain-997.json")
+        shutil.copyfile(FIXTURE_V122 / "issue-997.rpack", chain_dir / "issue-997.rpack")
+        src = tmp_path / "src"
+        src.mkdir()
+        shutil.copyfile(FIXTURE_V122 / "src" / "example3.py", src / "example3.py")
+        return chain_dir / "issue-997.rpack"
+
+    def test_fixture_files_present(self):
+        assert (FIXTURE_V122 / "chain-997.json").exists()
+        assert (FIXTURE_V122 / "issue-997.rpack").exists()
+        assert (FIXTURE_V122 / "src" / "example3.py").exists()
+
+    def test_fixture_is_byte_exact(self):
+        """Guards against EOL conversion or accidental edits. Fixture files are
+        stored LF-only (see .gitattributes): the artifact hash covers raw bytes,
+        and chain_hash covers the text the engine sees via read_text() — with
+        LF bytes on disk the two views are identical on every platform."""
+        for rel in ("chain-997.json", "issue-997.rpack", "src/example3.py"):
+            assert b"\r" not in (FIXTURE_V122 / rel).read_bytes(), (
+                f"fixture file {rel} gained CR bytes (EOL conversion?)"
+            )
+        bundle = json.loads((FIXTURE_V122 / "issue-997.rpack").read_bytes())
+        [artifact] = bundle["artifacts"]
+        assert artifact["path"] == "src/example3.py"
+        actual = fp.sha256_file(FIXTURE_V122 / "src" / "example3.py")
+        assert actual == artifact["sha256"], (
+            "fixture artifact bytes changed on disk"
+        )
+        chain_text = (FIXTURE_V122 / "chain-997.json").read_bytes().decode("utf-8")
+        assert fp.sha256_hex(chain_text) == bundle["chain_hash"], (
+            "fixture chain file bytes changed on disk"
+        )
+
+    def test_v122_bundle_verifies(self, tmp_path, monkeypatch, capsys):
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        code, output = self._verify(rpack, capsys)
+        assert code == 0
+        assert output["verified"] is True
+        assert output["errors"] == []
+        assert output["artifacts_checked"] == 1
+        assert output["artifacts_missing"] == 0
+        assert output["artifacts_tampered"] == 0
+
+    def test_v122_tampered_artifact_fails(self, tmp_path, monkeypatch, capsys):
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        artifact = tmp_path / "src" / "example3.py"
+        data = bytearray(artifact.read_bytes())
+        data[0] ^= 0xFF  # flip one byte
+        artifact.write_bytes(bytes(data))
+        monkeypatch.chdir(tmp_path)
+        code, output = self._verify(rpack, capsys)
+        assert code == 1
+        assert output["verified"] is False
+        assert output["artifacts_tampered"] == 1
+
+    def test_v122_tampered_chain_fails(self, tmp_path, monkeypatch, capsys):
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        chain_file = tmp_path / ".forgeproof" / "chain-997.json"
+        chain = json.loads(chain_file.read_text())
+        chain[2]["data"]["choice"] = "history, rewritten"
+        chain_file.write_text(json.dumps(chain, indent=2) + "\n")
+        monkeypatch.chdir(tmp_path)
+        code, output = self._verify(rpack, capsys)
+        assert code == 1
+        assert output["verified"] is False
+        assert any("hash mismatch" in e.lower() for e in output["errors"])
+
+    def test_v122_tampered_signature_fails(self, tmp_path, monkeypatch, capsys):
+        """Exercises the Ed25519 failure branch specifically: the signature
+        field is excluded from the root digest, so corrupting it leaves the
+        digest intact — only real signature verification can catch it. A
+        verify_signature that false-positives makes this test fail."""
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        bundle = json.loads(rpack.read_text())
+        # Corrupt the base64 payload inside the SSHSIG armor
+        lines = bundle["signature"].splitlines()
+        middle = len(lines) // 2
+        lines[middle] = lines[middle][::-1]
+        bundle["signature"] = "\n".join(lines)
+        rpack.write_text(json.dumps(bundle, indent=2) + "\n")
+        monkeypatch.chdir(tmp_path)
+        code, output = self._verify(rpack, capsys)
+        assert code == 1
+        assert output["verified"] is False
+        assert any("signature verification FAILED" in e for e in output["errors"])
+
+    def test_v122_bundle_passes_strict(self, tmp_path, monkeypatch, capsys):
+        self._require_sshkeygen()
+        rpack = self._deploy(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        args = fp.build_parser().parse_args(
+            ["verify", "--rpack", str(rpack), "--strict"])
+        with pytest.raises(SystemExit) as exc_info:
+            fp.cmd_verify(args)
+        code = exc_info.value.code
+        output = json.loads(capsys.readouterr().out)
+        assert (0 if code is None else code) == 0
+        assert output["verified"] is True
+        assert output["errors"] == []
+        assert output["strict"] is True
+        assert output["complete"] is True
+
+    def test_v122_strict_fails_when_artifact_removed(
             self, tmp_path, monkeypatch, capsys):
         self._require_sshkeygen()
         rpack = self._deploy(tmp_path)
@@ -2625,7 +2832,8 @@ class TestVerifyContract:
         assert output["complete"] is True
         assert [c["name"] for c in output["checks"]] == [
             "format", "root_digest", "signature", "chain_hash",
-            "chain_linkage", "artifacts", "coverage"]
+            "chain_linkage", "artifacts", "coverage",
+            "attestation", "attestation_signature", "attestation_subjects"]
         for c in output["checks"]:
             assert c["status"] in ("ok", "fail", "warn", "skipped")
             assert isinstance(c["detail"], str)
@@ -2637,6 +2845,17 @@ class TestVerifyContract:
         assert statuses["chain_linkage"] == "ok"
         assert statuses["artifacts"] == "ok"
         assert statuses["coverage"] == "ok"
+        # v1.3: absent attestation is SILENT — skipped, no errors, no warnings.
+        assert statuses["attestation"] == "skipped"
+        assert statuses["attestation_signature"] == "skipped"
+        assert statuses["attestation_subjects"] == "skipped"
+        assert output["warnings"] == []
+        # New result keys stay strictly after the frozen seven + v1.2.0 set.
+        assert list(output)[7:] == ["anchor", "strict", "complete", "checks",
+                                    "bundle", "attestation"]
+        assert output["attestation"] == {
+            "present": False, "predicate_type": None, "subject_count": None,
+            "key_id": None, "builder": None, "approvals": []}
         b = output["bundle"]
         assert set(b) == {"issue", "title", "root_digest", "public_key",
                           "chain_length", "first_timestamp", "last_timestamp",
@@ -2915,6 +3134,8 @@ class TestRecordGuards:
              patch.object(fp, "sign_ed25519", return_value="sig"), \
              patch.object(fp, "delete_private_key"), \
              patch.object(fp.shutil, "which", return_value=None), \
+             patch.object(fp, "load_attestation_signer",
+                          return_value=fp.EphemeralEd25519Signer(bytes(32))), \
              patch("sys.stdout"):
             fp.cmd_finalize(fp.build_parser().parse_args(
                 ["finalize", "--issue", issue, "--commit", "0" * 40]))
@@ -3054,3 +3275,1177 @@ class TestEndToEnd:
 
 # Need shutil for the integration test
 import shutil
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 Phase 1 — raw Ed25519 (RFC 8032), OpenSSH seed extraction, DSSE and
+# Sigstore-bundle encoding primitives. Pure functions; nothing lifecycle-wired.
+# ---------------------------------------------------------------------------
+
+import base64  # noqa: E402
+import time  # noqa: E402
+
+# RFC 8032 section 7.1 test vectors (TEST 1, 2, 3). The RFC's "SECRET KEY" is
+# the 32-byte seed, so each drops straight into the engine's seed-based API.
+RFC8032_VECTORS = [
+    (
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "",
+        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+        "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+    ),
+    (
+        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "72",
+        "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da"
+        "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+    ),
+    (
+        "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+        "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+        "af82",
+        "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac"
+        "18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a",
+    ),
+]
+
+# Group order L, restated independently of the engine (RFC 8032 section 5.1).
+ED25519_L_INDEPENDENT = 2**252 + 27742317777372353535851937790883648493
+ED25519_P_INDEPENDENT = 2**255 - 19
+
+TEST1_SEED = bytes.fromhex(RFC8032_VECTORS[0][0])
+TEST1_PUB = bytes.fromhex(RFC8032_VECTORS[0][1])
+TEST1_SIG = bytes.fromhex(RFC8032_VECTORS[0][3])
+TEST2_PUB = bytes.fromhex(RFC8032_VECTORS[1][1])
+
+
+class TestEd25519Primitive:
+    """RFC 8032 known-answer vectors plus fixed hostile-encoding vectors."""
+
+    def test_rfc8032_known_answers(self):
+        for seed_hex, pub_hex, msg_hex, sig_hex in RFC8032_VECTORS:
+            seed = bytes.fromhex(seed_hex)
+            msg = bytes.fromhex(msg_hex)
+            assert fp.ed25519_public_from_seed(seed).hex() == pub_hex
+            assert fp.ed25519_sign(seed, msg).hex() == sig_hex
+            assert fp.ed25519_verify(
+                bytes.fromhex(pub_hex), msg, bytes.fromhex(sig_hex)
+            )
+
+    def test_signing_is_deterministic(self):
+        a = fp.ed25519_sign(TEST1_SEED, b"determinism probe")
+        b = fp.ed25519_sign(TEST1_SEED, b"determinism probe")
+        assert a == b
+
+    def test_verify_rejects_wrong_message(self):
+        assert not fp.ed25519_verify(TEST1_PUB, b"x", TEST1_SIG)
+
+    def test_verify_rejects_flipped_signature(self):
+        bad = bytearray(TEST1_SIG)
+        bad[0] ^= 0x01
+        assert not fp.ed25519_verify(TEST1_PUB, b"", bytes(bad))
+
+    def test_verify_rejects_wrong_key(self):
+        assert not fp.ed25519_verify(TEST2_PUB, b"", TEST1_SIG)
+
+    def test_malleability_s_plus_l_rejected(self):
+        # The exact malleability class this repo patched twice at the SSHSIG
+        # tier: s' = s + L verifies under a naive verifier. Must be rejected.
+        r_part = TEST1_SIG[:32]
+        s = int.from_bytes(TEST1_SIG[32:], "little")
+        s_mall = s + ED25519_L_INDEPENDENT
+        mall = r_part + s_mall.to_bytes(32, "little")
+        assert fp.ed25519_verify(TEST1_PUB, b"", TEST1_SIG)  # sanity
+        assert not fp.ed25519_verify(TEST1_PUB, b"", mall)
+
+    def test_truncated_signature_rejected(self):
+        assert not fp.ed25519_verify(TEST1_PUB, b"", TEST1_SIG[:63])
+        assert not fp.ed25519_verify(TEST1_PUB, b"", b"")
+        assert not fp.ed25519_verify(TEST1_PUB, b"", TEST1_SIG + b"\x00")
+
+    def test_wrong_length_public_key_rejected(self):
+        assert not fp.ed25519_verify(TEST1_PUB[:31], b"", TEST1_SIG)
+        assert not fp.ed25519_verify(TEST1_PUB + b"\x00", b"", TEST1_SIG)
+        assert not fp.ed25519_verify(b"", b"", TEST1_SIG)
+
+    def test_noncanonical_y_ge_p_rejected(self):
+        # y = p encoded little-endian: numerically 0 mod p but a non-canonical
+        # encoding. Rejected as the public key AND as the signature's R point.
+        bad_point = ED25519_P_INDEPENDENT.to_bytes(32, "little")
+        assert not fp.ed25519_verify(bad_point, b"", TEST1_SIG)
+        bad_sig = bad_point + TEST1_SIG[32:]
+        assert not fp.ed25519_verify(TEST1_PUB, b"", bad_sig)
+
+    def test_nonsquare_x_rejected(self):
+        # y = 2: (y^2-1)/(d*y^2+1) is a quadratic non-residue mod p, so no x
+        # exists — decoding must fail (computed independently of the engine).
+        bad_point = (2).to_bytes(32, "little")
+        assert not fp.ed25519_verify(bad_point, b"", TEST1_SIG)
+        bad_sig = bad_point + TEST1_SIG[32:]
+        assert not fp.ed25519_verify(TEST1_PUB, b"", bad_sig)
+
+    def test_invalid_sign_bit_x0_rejected(self):
+        # y = 1 decodes to x = 0; RFC 8032 5.1.3: "if x = 0 and x_0 = 1,
+        # decoding fails". Rejected as public key and as R.
+        bad_point = (1 | (1 << 255)).to_bytes(32, "little")
+        assert not fp.ed25519_verify(bad_point, b"", TEST1_SIG)
+        bad_sig = bad_point + TEST1_SIG[32:]
+        assert not fp.ed25519_verify(TEST1_PUB, b"", bad_sig)
+
+    def test_public_from_seed_rejects_bad_length(self):
+        with pytest.raises(ValueError):
+            fp.ed25519_public_from_seed(b"\x00" * 31)
+
+    def test_signing_timing_floor(self):
+        start = time.perf_counter()
+        fp.ed25519_sign(TEST1_SEED, b"x" * 100_000)
+        assert time.perf_counter() - start < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Hand-built openssh-key-v1 containers, written from the format spec
+# independently of the engine parser (the round-trip doubles as a format
+# cross-check). Layout: magic, cipher, kdf, kdfoptions, nkeys, public blob(s),
+# then the private section (check-int x2, keytype, pub, priv=seed||pub,
+# comment, 1,2,3... padding to the 8-byte "none"-cipher block size).
+# ---------------------------------------------------------------------------
+
+
+def _ssh_str(b: bytes) -> bytes:
+    return len(b).to_bytes(4, "big") + b
+
+
+def _openssh_private_key_text(
+    seed: bytes,
+    pub: bytes,
+    cipher: bytes = b"none",
+    kdf: bytes = b"none",
+    keytype: bytes = b"ssh-ed25519",
+    checkints_match: bool = True,
+    truncate_at: "int | None" = None,
+) -> str:
+    check = b"\x12\x34\x56\x78"
+    check2 = check if checkints_match else b"\x87\x65\x43\x21"
+    private_section = (
+        check
+        + check2
+        + _ssh_str(keytype)
+        + _ssh_str(pub)
+        + _ssh_str(seed + pub)
+        + _ssh_str(b"forgeproof-test@example")
+    )
+    pad = 1
+    private_section = bytearray(private_section)
+    while len(private_section) % 8:
+        private_section.append(pad)
+        pad += 1
+    blob = (
+        b"openssh-key-v1\x00"
+        + _ssh_str(cipher)
+        + _ssh_str(kdf)
+        + _ssh_str(b"")
+        + (1).to_bytes(4, "big")
+        + _ssh_str(_ssh_str(keytype) + _ssh_str(pub))
+        + _ssh_str(bytes(private_section))
+    )
+    if truncate_at is not None:
+        blob = blob[:truncate_at]
+    b64 = base64.b64encode(blob).decode()
+    lines = [b64[i:i + 70] for i in range(0, len(b64), 70)]
+    return (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        + "\n".join(lines)
+        + "\n-----END OPENSSH PRIVATE KEY-----\n"
+    )
+
+
+def _ssh_pub_line(pub: bytes, keytype: bytes = b"ssh-ed25519",
+                  comment: str = "User@PC with spaces") -> str:
+    blob = _ssh_str(keytype) + _ssh_str(pub)
+    return f"ssh-ed25519 {base64.b64encode(blob).decode()} {comment}"
+
+
+class TestOpenSSHKeyParse:
+    """openssh_ed25519_seed + ssh_ed25519_pubkey_bytes: happy path against
+    hand-built containers and a real ssh-keygen key; every structural surprise
+    dies cleanly (no traceback)."""
+
+    def _write(self, tmp_path, text):
+        p = tmp_path / "key"
+        p.write_text(text, encoding="utf-8", newline="\n")
+        return p
+
+    def test_parses_handbuilt_container(self, tmp_path):
+        p = self._write(
+            tmp_path, _openssh_private_key_text(TEST1_SEED, TEST1_PUB))
+        assert fp.openssh_ed25519_seed(p) == TEST1_SEED
+
+    def test_real_sshkeygen_roundtrip(self):
+        _skip_without_sshkeygen()
+        priv, pub = fp.generate_ephemeral_keypair("katparse")
+        try:
+            seed = fp.openssh_ed25519_seed(priv)
+            derived = fp.ed25519_public_from_seed(seed)
+            blob = fp.ssh_ed25519_pubkey_bytes(pub.read_text().strip())
+            assert derived == blob
+            sig = fp.ed25519_sign(seed, b"cross-check")
+            assert fp.ed25519_verify(blob, b"cross-check", sig)
+        finally:
+            fp.delete_private_key(priv)
+
+    def _assert_dies(self, path, capsys, fragment=""):
+        with pytest.raises(SystemExit):
+            fp.openssh_ed25519_seed(path)
+        err = capsys.readouterr().err
+        assert "forgeproof: error:" in err
+        assert "Traceback" not in err
+        if fragment:
+            assert fragment in err
+
+    def test_missing_file_dies(self, tmp_path, capsys):
+        self._assert_dies(tmp_path / "absent", capsys)
+
+    def test_garbage_file_dies(self, tmp_path, capsys):
+        self._assert_dies(self._write(tmp_path, "not a key\n"), capsys)
+
+    def test_truncated_container_dies(self, tmp_path, capsys):
+        text = _openssh_private_key_text(TEST1_SEED, TEST1_PUB, truncate_at=40)
+        self._assert_dies(self._write(tmp_path, text), capsys)
+
+    def test_encrypted_key_dies(self, tmp_path, capsys):
+        text = _openssh_private_key_text(
+            TEST1_SEED, TEST1_PUB, cipher=b"aes256-ctr", kdf=b"bcrypt")
+        self._assert_dies(self._write(tmp_path, text), capsys, "encrypted")
+
+    def test_non_ed25519_key_dies(self, tmp_path, capsys):
+        text = _openssh_private_key_text(
+            TEST1_SEED, TEST1_PUB, keytype=b"ssh-rsa")
+        self._assert_dies(self._write(tmp_path, text), capsys)
+
+    def test_checkint_mismatch_dies(self, tmp_path, capsys):
+        text = _openssh_private_key_text(
+            TEST1_SEED, TEST1_PUB, checkints_match=False)
+        self._assert_dies(self._write(tmp_path, text), capsys)
+
+    def test_derived_pub_mismatch_dies(self, tmp_path, capsys):
+        # Internally consistent container whose embedded public key is NOT the
+        # one derived from the seed — the parse-bug tripwire must die loudly
+        # rather than sign with the wrong key.
+        text = _openssh_private_key_text(TEST1_SEED, TEST2_PUB)
+        self._assert_dies(self._write(tmp_path, text), capsys)
+
+    def test_pub_line_parses_with_spacey_comment(self):
+        line = _ssh_pub_line(TEST1_PUB)
+        assert fp.ssh_ed25519_pubkey_bytes(line) == TEST1_PUB
+
+    def test_pub_line_rejects_non_ed25519(self):
+        line = _ssh_pub_line(TEST1_PUB).replace(
+            "ssh-ed25519 ", "ssh-rsa ", 1)
+        with pytest.raises(ValueError):
+            fp.ssh_ed25519_pubkey_bytes(line)
+
+    def test_pub_line_rejects_bad_base64(self):
+        with pytest.raises(ValueError):
+            fp.ssh_ed25519_pubkey_bytes("ssh-ed25519 !!notbase64!! c")
+
+    def test_pub_line_rejects_wrong_blob_header(self):
+        blob = _ssh_str(b"ssh-rsa") + _ssh_str(TEST1_PUB)
+        line = f"ssh-ed25519 {base64.b64encode(blob).decode()} c"
+        with pytest.raises(ValueError):
+            fp.ssh_ed25519_pubkey_bytes(line)
+
+    def test_pub_line_rejects_wrong_key_length(self):
+        blob = _ssh_str(b"ssh-ed25519") + _ssh_str(TEST1_PUB[:31])
+        line = f"ssh-ed25519 {base64.b64encode(blob).decode()} c"
+        with pytest.raises(ValueError):
+            fp.ssh_ed25519_pubkey_bytes(line)
+
+    def test_pub_line_rejects_empty(self):
+        with pytest.raises(ValueError):
+            fp.ssh_ed25519_pubkey_bytes("")
+
+
+class TestDSSEEncoding:
+    """PAE, SPKI PEM, envelope + Sigstore bundle builders, and the signer seam.
+    Wrapper layout is the amendment-v2 contract: keyid-free signature, empty
+    publicKey identifier."""
+
+    def test_pae_known_answer(self):
+        # Example from the DSSE protocol spec.
+        assert fp.dsse_pae("http://example.com/HelloWorld", b"hello world") == (
+            b"DSSEv1 29 http://example.com/HelloWorld 11 hello world"
+        )
+
+    def test_pae_empty_payload(self):
+        assert fp.dsse_pae("t", b"") == b"DSSEv1 1 t 0 "
+
+    def test_spki_pem_golden(self):
+        pem = fp.ed25519_spki_pem(TEST1_PUB)
+        assert pem == (
+            "-----BEGIN PUBLIC KEY-----\n"
+            "MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n"
+            "-----END PUBLIC KEY-----\n"
+        )
+
+    def test_spki_pem_body_prefix_invariant(self):
+        # Every Ed25519 SPKI body starts with the DER prefix's base64 form.
+        body = fp.ed25519_spki_pem(TEST2_PUB).splitlines()[1]
+        assert body.startswith("MCowBQYDK2VwAyEA")
+
+    def _signer(self):
+        return fp.EphemeralEd25519Signer(TEST1_SEED)
+
+    def test_signer_seam_members(self):
+        signer = self._signer()
+        assert signer.public_bytes == TEST1_PUB
+        assert signer.verification_material() == {"publicKey": {}}
+        assert signer.sign(b"m") == fp.ed25519_sign(TEST1_SEED, b"m")
+
+    def test_envelope_shape_and_signature(self):
+        signer = self._signer()
+        payload = json.dumps({"probe": 1}).encode()
+        env = fp.build_dsse_envelope(payload, signer)
+        assert set(env.keys()) == {"payload", "payloadType", "signatures"}
+        assert env["payloadType"] == "application/vnd.in-toto+json"
+        assert len(env["signatures"]) == 1
+        # Amendment v2: the signature object carries sig ONLY — no keyid.
+        assert set(env["signatures"][0].keys()) == {"sig"}
+        # Standard base64 WITH padding, byte-identical on round-trip.
+        for value in (env["payload"], env["signatures"][0]["sig"]):
+            assert base64.b64encode(base64.b64decode(value)).decode() == value
+        assert base64.b64decode(env["payload"]) == payload
+        pae = fp.dsse_pae(env["payloadType"], payload)
+        assert fp.ed25519_verify(
+            signer.public_bytes, pae,
+            base64.b64decode(env["signatures"][0]["sig"]))
+
+    def test_bundle_shape(self):
+        signer = self._signer()
+        env = fp.build_dsse_envelope(b"{}", signer)
+        bundle = fp.build_sigstore_bundle(env, signer)
+        # protojson rejects unknown fields: nothing ForgeProof-specific in the
+        # wrapper, dsseEnvelope a SIBLING of verificationMaterial.
+        assert set(bundle.keys()) == {
+            "mediaType", "verificationMaterial", "dsseEnvelope"}
+        assert bundle["mediaType"] == (
+            "application/vnd.dev.sigstore.bundle.v0.3+json")
+        # Amendment v2: empty publicKey identifier — no hint, no keyid anywhere.
+        assert bundle["verificationMaterial"] == {"publicKey": {}}
+        assert bundle["dsseEnvelope"] is env
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 Phase 2 — approval action, builder identity, attestation emission
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalAction:
+    """The approval chain action: shape, engine-filled approver, bounded
+    decision values, silent-drop guards, and the explicit fallthrough."""
+
+    def _data(self, argv, approver="dev@example.com"):
+        args = fp.build_parser().parse_args(["record", "--issue", "7", *argv])
+        with patch.object(fp, "_approver_email", return_value=approver):
+            return fp._record_data_from_flags(args)
+
+    def test_approval_block_shape(self):
+        data = self._data(["--action", "approval", "--gate", "plan",
+                           "--decision", "approved", "--note", "LGTM"])
+        assert data == {"gate": "plan", "decision": "approved",
+                        "note": "LGTM", "approver": "dev@example.com"}
+
+    def test_note_optional_defaults_empty(self):
+        data = self._data(["--action", "approval", "--gate", "plan",
+                           "--decision", "rejected"])
+        assert data["note"] == ""
+        assert data["decision"] == "rejected"
+
+    def test_missing_required_flag_dies(self, capsys):
+        args = fp.build_parser().parse_args(
+            ["record", "--issue", "7", "--action", "approval",
+             "--decision", "approved"])
+        with pytest.raises(SystemExit):
+            fp._record_data_from_flags(args)
+        assert "--gate" in capsys.readouterr().err
+
+    def test_cross_action_misuse_rejected(self, capsys):
+        # A stray approval flag on another action must be rejected, not
+        # silently dropped (the _RECORD_DATA_FLAGS trap).
+        args = fp.build_parser().parse_args(
+            ["record", "--issue", "7", "--action", "decision",
+             "--context", "c", "--choice", "x", "--rationale", "r",
+             "--gate", "plan"])
+        with pytest.raises(SystemExit):
+            fp._record_data_from_flags(args)
+        assert "unexpected --gate" in capsys.readouterr().err
+
+    def test_decision_value_is_bounded(self):
+        with pytest.raises(SystemExit):
+            fp.build_parser().parse_args(
+                ["record", "--issue", "7", "--action", "approval",
+                 "--gate", "plan", "--decision", "maybe"])
+
+    def test_approver_from_git_config(self):
+        result = MagicMock(returncode=0, stdout="dev@example.com\n")
+        with patch.object(fp.shutil, "which", return_value="git"), \
+                patch.object(fp, "run", return_value=result):
+            assert fp._approver_email() == "dev@example.com"
+
+    def test_approver_git_absent_is_empty(self):
+        with patch.object(fp.shutil, "which", return_value=None):
+            assert fp._approver_email() == ""
+
+    def test_approver_git_failure_is_empty(self):
+        result = MagicMock(returncode=1, stdout="")
+        with patch.object(fp.shutil, "which", return_value="git"), \
+                patch.object(fp, "run", return_value=result):
+            assert fp._approver_email() == ""
+
+    def test_approver_no_identity_is_empty(self):
+        # git present but no user.email configured: empty stdout, rc 0.
+        result = MagicMock(returncode=0, stdout="\n")
+        with patch.object(fp.shutil, "which", return_value="git"), \
+                patch.object(fp, "run", return_value=result):
+            assert fp._approver_email() == ""
+
+    def test_approver_timeout_is_empty(self):
+        with patch.object(fp.shutil, "which", return_value="git"), \
+                patch.object(fp, "run",
+                             side_effect=subprocess.TimeoutExpired("git", 10)):
+            assert fp._approver_email() == ""
+
+    def test_unbranched_action_dies_loudly(self, capsys):
+        # A future action added to RECORD_FLAG_SPEC without a data-builder
+        # branch must fail loudly, never seal a wrong-shaped dict.
+        ns = fp.argparse.Namespace(
+            action="futureaction",
+            **{f: None for f in fp._RECORD_DATA_FLAGS})
+        with patch.dict(fp.RECORD_FLAG_SPEC,
+                        {"futureaction": {"required": [], "optional": []}}):
+            with pytest.raises(SystemExit):
+                fp._record_data_from_flags(ns)
+        assert "no data builder" in capsys.readouterr().err
+
+    def test_removed_data_flag_mentions_approval(self, capsys):
+        with pytest.raises(SystemExit):
+            fp.build_parser().parse_args(
+                ["record", "--issue", "7", "--action", "approval",
+                 "--data", "{}"])
+        assert "approval --gate --decision" in capsys.readouterr().err
+
+
+def _real_attested_run(tmp_path, monkeypatch, capsys, issue="41",
+                       with_artifact=True, model=None):
+    """Drive the REAL lifecycle (init → records → approval → finalize) with a
+    real ssh-keygen key, returning the emitted bundle, paths, and finalize's
+    result JSON. shutil.which is nulled during finalize so the gh and claude
+    probes stay offline-deterministic (repo_url "", version "unknown")."""
+    _skip_without_sshkeygen()
+    monkeypatch.setattr(fp, "CHAIN_DIR", tmp_path / ".forgeproof")
+    monkeypatch.chdir(tmp_path)
+    parse = fp.build_parser().parse_args
+    fp.cmd_init(parse(["init", "--issue", issue, "--title", "Attest run",
+                       "--requirement", "REQ-1: emit attestation"]))
+    if with_artifact:
+        src = tmp_path / "src"
+        src.mkdir(exist_ok=True)
+        (src / "thing.py").write_text("VALUE = 1\n", encoding="utf-8")
+        fp.cmd_record(parse([
+            "record", "--issue", issue, "--action", "file-edit",
+            "--path", "src/thing.py", "--operation", "create"]))
+    fp.cmd_record(parse([
+        "record", "--issue", issue, "--action", "test-result",
+        "--suite", "pytest", "--passed", "1", "--failed", "0",
+        "--covers", "REQ-1=test_thing"]))
+    with patch.object(fp, "_approver_email", return_value="ryan@example.com"):
+        fp.cmd_record(parse([
+            "record", "--issue", issue, "--action", "approval",
+            "--gate", "plan", "--decision", "approved", "--note", "LGTM"]))
+    capsys.readouterr()
+    argv = ["finalize", "--issue", issue, "--commit", "a" * 40]
+    if model:
+        argv += ["--model", model]
+    with patch.object(fp.shutil, "which", return_value=None):
+        fp.cmd_finalize(parse(argv))
+    result = json.loads(capsys.readouterr().out)
+    chain_dir = tmp_path / ".forgeproof"
+    rpack = chain_dir / f"issue-{issue}.rpack"
+    return {
+        "bundle": json.loads(rpack.read_text(encoding="utf-8")),
+        "rpack": rpack,
+        "sidecar": chain_dir / f"issue-{issue}.sigstore.json",
+        "pem": chain_dir / f"issue-{issue}.pub.pem",
+        "chain": chain_dir / f"chain-{issue}.json",
+        "result": result,
+        "issue": issue,
+    }
+
+
+class TestFinalizeAttestation:
+    """Attestation emission: shapes, byte contracts, subject rules, rollback."""
+
+    def _statement(self, bundle):
+        env = bundle["attestation"]["dsseEnvelope"]
+        return json.loads(base64.b64decode(env["payload"]))
+
+    def test_emits_three_files_with_contracted_shapes(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys)
+        bundle = run["bundle"]
+        assert bundle["version"] == "1.1.0"
+        att = bundle["attestation"]
+        assert att["mediaType"] == (
+            "application/vnd.dev.sigstore.bundle.v0.3+json")
+        assert att["verificationMaterial"] == {"publicKey": {}}
+        env = att["dsseEnvelope"]
+        assert env["payloadType"] == "application/vnd.in-toto+json"
+        assert len(env["signatures"]) == 1
+        assert set(env["signatures"][0]) == {"sig"}
+        # Emission invariant: sidecar bytes == canonical embedded copy, no
+        # newline bytes of either kind, pure ASCII.
+        raw = run["sidecar"].read_bytes()
+        assert raw == fp.canonical_json(att).encode("utf-8")
+        assert b"\x0a" not in raw and b"\x0d" not in raw
+        raw.decode("ascii")
+        pem_bytes = run["pem"].read_bytes()
+        assert b"\r" not in pem_bytes
+        body = run["pem"].read_text(encoding="utf-8").splitlines()[1]
+        assert body.startswith("MCowBQYDK2VwAyEA")
+        spki = base64.b64decode(body)
+        assert spki[12:] == fp.ssh_ed25519_pubkey_bytes(bundle["public_key"])
+
+    def test_finalize_result_lists_sidecar_paths(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="44")
+        result = run["result"]
+        # The existing six keys are untouched; the two new ones are additive.
+        assert set(result) == {
+            "rpack_path", "root_digest", "evaluation_status", "chain_length",
+            "artifacts_count", "requirements_count",
+            "attestation_path", "public_key_path"}
+        assert result["attestation_path"].endswith("issue-44.sigstore.json")
+        assert result["public_key_path"].endswith("issue-44.pub.pem")
+
+    def test_dsse_signature_verifies_and_binds_to_bundle_key(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="45")
+        bundle = run["bundle"]
+        env = bundle["attestation"]["dsseEnvelope"]
+        payload = base64.b64decode(env["payload"])
+        pae = fp.dsse_pae(env["payloadType"], payload)
+        pub = fp.ssh_ed25519_pubkey_bytes(bundle["public_key"])
+        sig = base64.b64decode(env["signatures"][0]["sig"])
+        assert fp.ed25519_verify(pub, pae, sig)
+
+    def test_statement_subjects_equal_artifacts(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="46")
+        bundle = run["bundle"]
+        stmt = self._statement(bundle)
+        assert stmt["_type"] == "https://in-toto.io/Statement/v1"
+        assert stmt["predicateType"] == "https://slsa.dev/provenance/v1"
+        subjects = {(s["name"], s["digest"]["sha256"])
+                    for s in stmt["subject"]}
+        artifacts = {(a["path"], a["sha256"]) for a in bundle["artifacts"]}
+        assert subjects == artifacts
+        assert len(stmt["subject"]) == len(bundle["artifacts"]) > 0
+        for s in stmt["subject"]:
+            assert "sha256" in s["digest"]
+
+    def test_zero_artifact_run_emits_single_chain_subject(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="47",
+                                 with_artifact=False)
+        bundle = run["bundle"]
+        stmt = self._statement(bundle)
+        assert stmt["subject"] == [{
+            "name": ".forgeproof/chain-47.json",
+            "digest": {"sha256": bundle["chain_hash"]}}]
+
+    def test_predicate_carries_approvals_builder_and_chain_metadata(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="48",
+                                 model="claude-fable-5")
+        bundle = run["bundle"]
+        pred = self._statement(bundle)["predicate"]
+        approvals = pred["buildDefinition"]["externalParameters"]["approvals"]
+        assert approvals == [{
+            "gate": "plan", "decision": "approved", "note": "LGTM",
+            "approver": "ryan@example.com", "evidence": "agent-recorded"}]
+        builder = pred["buildDefinition"]["internalParameters"]["builder"]
+        assert builder["model"] == {"id": "claude-fable-5",
+                                    "source": "self-reported"}
+        assert builder["claude_code"] == {"version": "unknown",
+                                          "source": "measured"}
+        assert builder["plugin"] == {"version": fp.PLUGIN_VERSION,
+                                     "source": "engine-constant"}
+        chain_blocks = json.loads(run["chain"].read_text(encoding="utf-8"))
+        meta = pred["runDetails"]["metadata"]
+        assert meta["invocationId"] == chain_blocks[0]["hash"]
+        assert meta["startedOn"] == chain_blocks[0]["timestamp"]
+        assert meta["finishedOn"] == chain_blocks[-1]["timestamp"]
+        chain_desc = [b for b in pred["runDetails"]["byproducts"]
+                      if b["name"] == ".forgeproof/chain-48.json"]
+        assert len(chain_desc) == 1
+        # The byproduct digest is the SAME chain_hash the bundle seals —
+        # LF-normalized decoded text, never a byte re-hash (finding 8).
+        assert chain_desc[0]["digest"]["sha256"] == bundle["chain_hash"]
+        # finalize block carries builder; approval block carries approver
+        assert chain_blocks[-1]["data"]["builder"] == builder
+        approval_blocks = [b for b in chain_blocks
+                           if b["action"] == "approval"]
+        assert len(approval_blocks) == 1
+        assert approval_blocks[0]["data"]["approver"] == "ryan@example.com"
+
+    def test_verify_green_and_attestation_covered_by_root_digest(
+            self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="49")
+        code, out = _run_verify(["--rpack", str(run["rpack"])], capsys)
+        assert code == 0
+        assert json.loads(out)["errors"] == []
+        # Flip one value INSIDE the embedded attestation: root_digest must go
+        # red — the attestation is NOT in the bundle_for_hash denylist.
+        bundle = run["bundle"]
+        bundle["attestation"]["mediaType"] = "application/x-evil"
+        run["rpack"].write_text(json.dumps(bundle, indent=2) + "\n",
+                                encoding="utf-8")
+        code, out = _run_verify(["--rpack", str(run["rpack"])], capsys)
+        output = json.loads(out)
+        assert code == 1
+        statuses = {c["name"]: c["status"] for c in output["checks"]}
+        assert statuses["root_digest"] == "fail"
+        assert any(e.startswith("Root digest mismatch") for e in output["errors"])
+
+    def test_denylist_source_grep(self):
+        # The one line that makes the whole design work (finding 1): the
+        # root-digest denylist must stay exactly root_digest + signature.
+        source = FORGEPROOF_PY.read_text(encoding="utf-8")
+        assert 'if k not in ("root_digest", "signature")' in source
+
+    def test_gate_accepts_v13_bundle(self, tmp_path, monkeypatch, capsys):
+        run = _real_attested_run(tmp_path, monkeypatch, capsys, issue="50")
+        assert run["rpack"].is_file()
+        event = json.dumps({"tool_name": "Bash",
+                            "tool_input": {"command": "gh pr create --fill"}})
+        monkeypatch.setattr("sys.stdin", io.StringIO(event))
+        with pytest.raises(SystemExit) as exc_info:
+            fp.cmd_gate_pr(fp.argparse.Namespace())
+        capsys.readouterr()
+        assert exc_info.value.code in (0, None)
+
+    # -- failure paths: fake-key fixture, patched signing ---------------------
+
+    def _fake_setup(self, tmp_path, monkeypatch, issue="43"):
+        monkeypatch.setattr(fp, "CHAIN_DIR", tmp_path / ".forgeproof")
+        monkeypatch.chdir(tmp_path)
+        priv = tmp_path / "key"
+        pub = tmp_path / "key.pub"
+        priv.write_text("fake_private")
+        pub.write_text("ssh-ed25519 AAAA fake")
+        artifact = tmp_path / "art.py"
+        artifact.write_text("a = 1\n")
+        with patch.object(fp, "generate_ephemeral_keypair",
+                          return_value=(priv, pub)), \
+                patch.object(fp, "sign_ed25519", return_value="sig"), \
+                patch("sys.stdout"):
+            fp.cmd_init(fp.build_parser().parse_args(
+                ["init", "--issue", issue, "--title", "x", "--force"]))
+            with patch.object(fp, "get_key_path", return_value=priv):
+                fp.cmd_record(fp.build_parser().parse_args(
+                    ["record", "--issue", issue, "--action", "file-edit",
+                     "--path", "art.py", "--operation", "create"]))
+        return issue, priv
+
+    def test_unparseable_key_dies_before_chain_mutation(
+            self, tmp_path, monkeypatch, capsys):
+        issue, priv = self._fake_setup(tmp_path, monkeypatch)
+        chain_file = fp.chain_path(issue)
+        before = chain_file.read_bytes()
+        args = fp.build_parser().parse_args(
+            ["finalize", "--issue", issue, "--commit", "0" * 40])
+        with patch.object(fp, "get_key_path", return_value=priv), \
+                patch.object(fp, "sign_ed25519", return_value="sig"), \
+                patch.object(fp.shutil, "which", return_value=None), \
+                patch("sys.stdout"):
+            with pytest.raises(SystemExit):
+                fp.cmd_finalize(args)
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert chain_file.read_bytes() == before  # chain never mutated
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.rpack").exists()
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.sigstore.json").exists()
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.pub.pem").exists()
+        assert priv.exists()  # retryable: key retained
+
+    def test_attestation_failure_rolls_back_chain(
+            self, tmp_path, monkeypatch, capsys):
+        issue, priv = self._fake_setup(tmp_path, monkeypatch, issue="51")
+        chain_file = fp.chain_path(issue)
+        before = chain_file.read_bytes()
+        args = fp.build_parser().parse_args(
+            ["finalize", "--issue", issue, "--commit", "0" * 40])
+        with patch.object(fp, "get_key_path", return_value=priv), \
+                patch.object(fp, "sign_ed25519", return_value="sig"), \
+                patch.object(fp.shutil, "which", return_value=None), \
+                patch.object(fp, "load_attestation_signer",
+                             return_value=fp.EphemeralEd25519Signer(bytes(32))), \
+                patch.object(fp, "build_attestation",
+                             side_effect=RuntimeError("injected failure")), \
+                patch("sys.stdout"):
+            with pytest.raises(SystemExit):
+                fp.cmd_finalize(args)
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "restored" in err
+        assert chain_file.read_bytes() == before  # rolled back byte-for-byte
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.rpack").exists()
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.sigstore.json").exists()
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.pub.pem").exists()
+        assert priv.exists()
+
+    def test_sidecar_write_failure_rolls_back(
+            self, tmp_path, monkeypatch, capsys):
+        issue, priv = self._fake_setup(tmp_path, monkeypatch, issue="52")
+        chain_file = fp.chain_path(issue)
+        before = chain_file.read_bytes()
+        args = fp.build_parser().parse_args(
+            ["finalize", "--issue", issue, "--commit", "0" * 40])
+        with patch.object(fp, "get_key_path", return_value=priv), \
+                patch.object(fp, "sign_ed25519", return_value="sig"), \
+                patch.object(fp.shutil, "which", return_value=None), \
+                patch.object(fp, "load_attestation_signer",
+                             return_value=fp.EphemeralEd25519Signer(bytes(32))), \
+                patch.object(fp, "ed25519_spki_pem",
+                             side_effect=OSError("disk full")), \
+                patch("sys.stdout"):
+            with pytest.raises(SystemExit):
+                fp.cmd_finalize(args)
+        assert chain_file.read_bytes() == before
+        # No partial outputs left behind either.
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.rpack").exists()
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.sigstore.json").exists()
+        assert not (fp.CHAIN_DIR / f"issue-{issue}.pub.pem").exists()
+        assert priv.exists()
+
+    def test_model_from_magicmock_namespace_is_empty_string(
+            self, tmp_path, monkeypatch, capsys):
+        # A MagicMock namespace returns a truthy Mock for .model; the
+        # cmd_verify:v1.2 discipline (isinstance str) must coerce it to "".
+        issue, priv = self._fake_setup(tmp_path, monkeypatch, issue="53")
+        args = MagicMock()
+        args.issue = issue
+        args.commit = "0" * 40
+        with patch.object(fp, "get_key_path", return_value=priv), \
+                patch.object(fp, "sign_ed25519", return_value="sig"), \
+                patch.object(fp.shutil, "which", return_value=None), \
+                patch.object(fp, "load_attestation_signer",
+                             return_value=fp.EphemeralEd25519Signer(bytes(32))), \
+                patch("sys.stdout"):
+            fp.cmd_finalize(args)
+        chain_blocks = json.loads(fp.chain_path(issue).read_text(encoding="utf-8"))
+        assert chain_blocks[-1]["data"]["builder"]["model"]["id"] == ""
+
+
+class TestVersionAndFormat:
+    """Format version 1.1.0: membership-only recognition, manifest sync."""
+
+    def test_plugin_version_syncs_with_manifest(self):
+        manifest = json.loads(
+            (SCRIPT_DIR.parent.parent.parent / ".claude-plugin" /
+             "plugin.json").read_text(encoding="utf-8"))
+        assert fp.PLUGIN_VERSION == manifest["version"]
+
+    def test_rpack_version_and_membership_set(self):
+        assert fp.RPACK_VERSION == "1.1.0"
+        # Append-only, membership-only — NEVER an ordering (finding 12).
+        assert fp.KNOWN_RPACK_VERSIONS == frozenset({"1.0.0", "1.1.0"})
+
+    def _reversioned(self, tmp_path, version, issue="1"):
+        proj = tmp_path / "proj"
+        rpack = _deploy_v12_project(proj, issue=issue)
+        bundle = json.loads(rpack.read_text(encoding="utf-8"))
+        bundle["version"] = version
+        _sign_bundle(bundle)
+        rpack.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        return proj, rpack
+
+    def test_known_old_version_verifies_without_warning(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._reversioned(tmp_path, "1.0.0")
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        assert code == 0
+        assert output["warnings"] == []
+        fmt = [c for c in output["checks"] if c["name"] == "format"][0]
+        assert fmt["status"] == "ok"
+        # The detail must print the BUNDLE's version, not the engine's.
+        assert "1.0.0" in fmt["detail"]
+
+    def test_unknown_version_warns_with_bundle_version(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._reversioned(tmp_path, "9.9.9")
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        assert code == 0  # unknown version alone is a warning, never an error
+        assert len(output["warnings"]) == 1
+        assert "9.9.9" in output["warnings"][0]
+        fmt = [c for c in output["checks"] if c["name"] == "format"][0]
+        assert fmt["status"] == "warn"
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 Phase 3 — verification of the attestation
+# ---------------------------------------------------------------------------
+
+
+def _attested_deploy(tmp_path, issue="1", approvals=None, builder=None):
+    """An attested, validly-signed v1.1.0 bundle deployed like a real
+    checkout. The DSSE tier signs with the SAME key as the SSHSIG tier — the
+    shared test keypair's seed is parsed with the engine's own parser — so
+    the key-binding check has a true-positive baseline."""
+    proj = tmp_path / "proj"
+    rpack = _deploy_v12_project(proj, issue=issue)
+    bundle = json.loads(rpack.read_text(encoding="utf-8"))
+    priv, _pub_text = _test_signing_key()
+    signer = fp.EphemeralEd25519Signer(fp.openssh_ed25519_seed(priv))
+    chain = json.loads((proj / ".forgeproof" / f"chain-{issue}.json")
+                       .read_text(encoding="utf-8"))
+    if builder is not None:
+        # Inject a builder identity into the statement's view of the finalize
+        # block (the chain FILE is untouched, so chain_hash stays green).
+        chain = [dict(b) for b in chain]
+        chain[-1] = dict(chain[-1], data=dict(chain[-1]["data"],
+                                              builder=builder))
+    core = {k: v for k, v in bundle.items()
+            if k not in ("root_digest", "signature", "attestation")}
+    statement = fp.build_intoto_statement(core, chain, approvals or [], "")
+    bundle["attestation"] = fp.build_attestation(statement, signer)
+    _sign_bundle(bundle)
+    rpack.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+    return proj, rpack
+
+
+def _retamper_attested(rpack, mutate_statement=None, resign_dsse=True,
+                       signer_seed=None, mutate_bundle=None):
+    """Tamper helper: optionally mutate the decoded statement and/or the
+    bundle, optionally re-sign the DSSE tier, then ALWAYS re-sign the SSHSIG
+    tier so root_digest stays green — isolating the attestation checks from
+    the root-digest check."""
+    bundle = json.loads(rpack.read_text(encoding="utf-8"))
+    if mutate_statement is not None:
+        env = bundle["attestation"]["dsseEnvelope"]
+        statement = json.loads(base64.b64decode(env["payload"]))
+        mutate_statement(statement)
+        if resign_dsse:
+            if signer_seed is None:
+                priv, _ = _test_signing_key()
+                signer_seed = fp.openssh_ed25519_seed(priv)
+            bundle["attestation"] = fp.build_attestation(
+                statement, fp.EphemeralEd25519Signer(signer_seed))
+        else:
+            env["payload"] = base64.b64encode(
+                fp.canonical_json(statement).encode("utf-8")).decode("ascii")
+    elif signer_seed is not None:
+        # Re-sign the UNCHANGED statement with a foreign key.
+        env = bundle["attestation"]["dsseEnvelope"]
+        statement = json.loads(base64.b64decode(env["payload"]))
+        bundle["attestation"] = fp.build_attestation(
+            statement, fp.EphemeralEd25519Signer(signer_seed))
+    if mutate_bundle is not None:
+        mutate_bundle(bundle)
+    _sign_bundle(bundle)
+    rpack.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+    return bundle
+
+
+class TestVerifyAttestation:
+    """The three additive checks: silent when absent, tamper-class on any
+    broken invariant, plain FAILED on signed-malformed input."""
+
+    NEW_MARKERS = ("Attestation signature invalid", "Attestation key mismatch",
+                   "Attestation subjects", "Attestation chain digest")
+
+    def _marker_hits(self, err):
+        return sum(marker in err for marker in fp.TAMPER_ERROR_MARKERS)
+
+    def _attestation_errors(self, output):
+        return [e for e in output["errors"] if e.startswith("Attestation")]
+
+    def test_attested_bundle_green_all_checks_ok(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = _attested_deploy(tmp_path)
+        monkeypatch.chdir(proj)
+        for strict in (False, True):
+            argv = ["--rpack", str(rpack)] + (["--strict"] if strict else [])
+            code, out = _run_verify(argv, capsys)
+            output = json.loads(out)
+            assert code == 0
+            assert output["errors"] == []
+            assert output["warnings"] == []
+            statuses = {c["name"]: c["status"] for c in output["checks"]}
+            assert statuses["attestation"] == "ok"
+            assert statuses["attestation_signature"] == "ok"
+            assert statuses["attestation_subjects"] == "ok"
+        att = output["attestation"]
+        assert att["present"] is True
+        assert att["predicate_type"] == "https://slsa.dev/provenance/v1"
+        assert att["subject_count"] == 1
+        assert isinstance(att["key_id"], str) and att["key_id"]
+
+    def test_no_attestation_is_silent_in_every_mode(
+            self, tmp_path, monkeypatch, capsys):
+        proj = tmp_path / "proj"
+        rpack = _deploy_v12_project(proj)
+        monkeypatch.chdir(proj)
+        for strict in (False, True):
+            argv = ["--rpack", str(rpack)] + (["--strict"] if strict else [])
+            code, out = _run_verify(argv, capsys)
+            output = json.loads(out)
+            assert code == 0
+            assert output["errors"] == []
+            assert output["warnings"] == []
+            statuses = {c["name"]: c["status"] for c in output["checks"]}
+            assert statuses["attestation"] == "skipped"
+            assert statuses["attestation_signature"] == "skipped"
+            assert statuses["attestation_subjects"] == "skipped"
+        assert output["attestation"] == {
+            "present": False, "predicate_type": None, "subject_count": None,
+            "key_id": None, "builder": None, "approvals": []}
+
+    # -- tamper matrix: each invariant broken individually ------------------
+
+    def _assert_tamper(self, output, code, failing_check):
+        assert code == 1
+        errs = self._attestation_errors(output)
+        assert len(errs) == 1
+        assert self._marker_hits(errs[0]) == 1  # exactly one marker matches
+        statuses = {c["name"]: c["status"] for c in output["checks"]}
+        assert statuses[failing_check] == "fail"
+        assert statuses["root_digest"] == "ok"  # isolation: tamper re-signed
+
+    def test_payload_edit_without_resign_is_tamper(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = _attested_deploy(tmp_path)
+        _retamper_attested(
+            rpack, resign_dsse=False,
+            mutate_statement=lambda s: s["predicate"].update(evil=True))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        self._assert_tamper(output, code, "attestation_signature")
+        assert "Attestation signature invalid" in output["errors"][0]
+        # And the markdown verdict calls it tampering.
+        code_md, out_md = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert code_md == 1
+        assert "TAMPER DETECTED" in out_md
+
+    def test_signature_byte_flip_is_tamper(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = _attested_deploy(tmp_path)
+
+        def flip_sig(bundle):
+            env = bundle["attestation"]["dsseEnvelope"]
+            sig = bytearray(base64.b64decode(env["signatures"][0]["sig"]))
+            sig[0] ^= 0x01
+            env["signatures"][0]["sig"] = base64.b64encode(
+                bytes(sig)).decode("ascii")
+
+        _retamper_attested(rpack, mutate_bundle=flip_sig)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_tamper(json.loads(out), code, "attestation_signature")
+
+    def test_foreign_dsse_key_is_tamper(self, tmp_path, monkeypatch, capsys):
+        # A DSSE tier re-signed with a DIFFERENT key than the bundle's own
+        # ssh-ed25519 key must fail: the key binding is the payoff of the
+        # one-key design.
+        proj, rpack = _attested_deploy(tmp_path)
+        _retamper_attested(rpack, signer_seed=b"\x01" * 32)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        self._assert_tamper(output, code, "attestation_signature")
+        assert "Attestation signature invalid" in output["errors"][0]
+
+    def test_subject_digest_edit_is_tamper(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = _attested_deploy(tmp_path)
+
+        def edit_subject(statement):
+            statement["subject"][0]["digest"]["sha256"] = "0" * 64
+
+        _retamper_attested(rpack, mutate_statement=edit_subject)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        self._assert_tamper(output, code, "attestation_subjects")
+        assert "Attestation subjects" in output["errors"][0]
+        code_md, out_md = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert "TAMPER DETECTED" in out_md
+
+    def test_chain_byproduct_edit_is_tamper(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = _attested_deploy(tmp_path)
+
+        def edit_byproduct(statement):
+            for b in statement["predicate"]["runDetails"]["byproducts"]:
+                if b["name"].startswith(".forgeproof/chain-"):
+                    b["digest"]["sha256"] = "f" * 64
+
+        _retamper_attested(rpack, mutate_statement=edit_byproduct)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        output = json.loads(out)
+        self._assert_tamper(output, code, "attestation_subjects")
+        assert "Attestation chain digest" in output["errors"][0]
+
+    # -- malformed matrix: root digest intact => FAILED, never TAMPER --------
+
+    def _assert_malformed(self, output, code):
+        assert code == 1
+        errs = self._attestation_errors(output)
+        assert len(errs) == 1
+        assert errs[0].startswith("Attestation malformed")
+        assert self._marker_hits(errs[0]) == 0  # matches NO tamper marker
+        statuses = {c["name"]: c["status"] for c in output["checks"]}
+        assert statuses["attestation"] == "fail"
+        assert statuses["attestation_signature"] == "skipped"
+        assert statuses["attestation_subjects"] == "skipped"
+
+    def _malform(self, tmp_path, mutate_bundle):
+        proj, rpack = _attested_deploy(tmp_path)
+        _retamper_attested(rpack, mutate_bundle=mutate_bundle)
+        return proj, rpack
+
+    def test_attestation_wrong_type_is_failed_not_tamper(
+            self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._malform(
+            tmp_path, lambda b: b.update(attestation="not an object"))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+        code_md, out_md = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert code_md == 1
+        assert "VERIFICATION FAILED" in out_md
+        assert "TAMPER" not in out_md
+
+    def test_payload_not_base64_is_failed(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = self._malform(
+            tmp_path,
+            lambda b: b["attestation"]["dsseEnvelope"].update(payload="!!!"))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    def test_payload_not_json_is_failed(self, tmp_path, monkeypatch, capsys):
+        garbage = base64.b64encode(b"not json").decode("ascii")
+        proj, rpack = self._malform(
+            tmp_path,
+            lambda b: b["attestation"]["dsseEnvelope"].update(payload=garbage))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    def test_statement_missing_keys_is_failed(
+            self, tmp_path, monkeypatch, capsys):
+        payload = base64.b64encode(
+            fp.canonical_json({"foo": 1}).encode("utf-8")).decode("ascii")
+        proj, rpack = self._malform(
+            tmp_path,
+            lambda b: b["attestation"]["dsseEnvelope"].update(payload=payload))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    def test_subject_wrong_type_is_failed(self, tmp_path, monkeypatch, capsys):
+        proj, rpack = _attested_deploy(tmp_path)
+        _retamper_attested(
+            rpack, resign_dsse=False,
+            mutate_statement=lambda s: s.update(subject="nope"))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    def test_two_signatures_is_failed(self, tmp_path, monkeypatch, capsys):
+        def dup_sig(bundle):
+            sigs = bundle["attestation"]["dsseEnvelope"]["signatures"]
+            sigs.append(dict(sigs[0]))
+        proj, rpack = self._malform(tmp_path, dup_sig)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    def test_deeply_nested_payload_fails_cleanly(
+            self, tmp_path, monkeypatch, capsys):
+        # Real nesting with a shape fallback (per house rule): on builds where
+        # json survives 2000 levels the result is a list, not an object — the
+        # same clean malformed error either way. The forced-condition variant
+        # is the next test.
+        deep = base64.b64encode(
+            ("[" * 2000 + "]" * 2000).encode("ascii")).decode("ascii")
+        proj, rpack = self._malform(
+            tmp_path,
+            lambda b: b["attestation"]["dsseEnvelope"].update(payload=deep))
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    def test_forced_recursionerror_in_payload_parse_fails_cleanly(
+            self, tmp_path, monkeypatch, capsys):
+        # Force the condition (never assert platform-dependent natural
+        # nesting): RecursionError raised ONLY for the attestation payload
+        # parse — the bundle read itself must keep working.
+        proj, rpack = _attested_deploy(tmp_path)
+        bundle = json.loads(rpack.read_text(encoding="utf-8"))
+        payload_text = base64.b64decode(
+            bundle["attestation"]["dsseEnvelope"]["payload"]).decode("utf-8")
+        real_loads = fp.json.loads
+
+        def loads_forced(s, *a, **k):
+            if isinstance(s, str) and s == payload_text:
+                raise RecursionError("forced")
+            return real_loads(s, *a, **k)
+
+        monkeypatch.setattr(fp.json, "loads", loads_forced)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(["--rpack", str(rpack)], capsys)
+        self._assert_malformed(json.loads(out), code)
+
+    # -- report + marker hygiene --------------------------------------------
+
+    def test_markdown_attestation_section(self, tmp_path, monkeypatch, capsys):
+        approvals = [{"gate": "plan", "decision": "approved",
+                      "note": "[evil](x)", "approver": "ryan@example.com"}]
+        builder = {"model": {"id": "claude-fable-5", "source": "self-reported"},
+                   "plugin": {"version": fp.PLUGIN_VERSION,
+                              "source": "engine-constant"}}
+        proj, rpack = _attested_deploy(tmp_path, approvals=approvals,
+                                       builder=builder)
+        monkeypatch.chdir(proj)
+        code, out = _run_verify(
+            ["--rpack", str(rpack), "--format", "markdown"], capsys)
+        assert code == 0
+        assert "### Attestation" in out
+        assert "cosign verify-blob-attestation" in out
+        assert "claude-fable-5" in out
+        assert "self-reported" in out
+        assert "agent-recorded" in out
+        # Attacker-controlled note is escaped by md_cell.
+        assert "\\[evil\\]" in out
+        assert "[evil](x)" not in out
+        # The checks table picked up the three new rows automatically.
+        assert "| attestation |" in out
+        assert "| attestation_signature |" in out
+        assert "| attestation_subjects |" in out
+
+    def test_new_tamper_markers_registered_and_clean(self):
+        for marker in self.NEW_MARKERS:
+            assert marker in fp.TAMPER_ERROR_MARKERS
+            # New markers must not collide with the legacy substring traps.
+            assert "hash mismatch" not in marker
+            assert "prev_hash" not in marker
