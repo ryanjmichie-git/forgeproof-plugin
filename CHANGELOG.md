@@ -87,6 +87,12 @@ failure.
   `username@hostname` in the ssh-keygen public-key comment, so the "no
   personal information" claim was false before v1.3.0 existed. It now states
   that plainly and documents the new approver-email field and sidecar files.
+- **PR gate on the authoritative CI check re-pinned.** The dogfood workflow and
+  the consumer recipe (`README.md`, `docs/branch-protection.md`) now pin
+  `forgeproof-verify` **v1.1.0** (commit `6101dd7`), which vendors this
+  v1.3.0 engine — so the authoritative PR check runs the three attestation
+  checks and exposes an additive `attestation` output, while frozen v1.0.x,
+  v1.1.x, and v1.2.x bundles still pass it with zero warnings.
 
 ### Compatibility
 

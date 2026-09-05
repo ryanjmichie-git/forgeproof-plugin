@@ -2,7 +2,7 @@
 
 **Thesis:** Don't certify the model — attest the work. As AI authors more of the world's code, a verifiable record of *what the AI did, who authorized it, and whether it changed since* stops being a nice-to-have and becomes infrastructure. Every release below advances one layer of that trust stack.
 
-*Last updated: 2026-07-12 · Maintainer: [@ryanjmichie-git](https://github.com/ryanjmichie-git) · Shipped details live in [CHANGELOG.md](CHANGELOG.md)*
+*Last updated: 2026-09-05 · Maintainer: [@ryanjmichie-git](https://github.com/ryanjmichie-git) · Shipped details live in [CHANGELOG.md](CHANGELOG.md)*
 
 This roadmap is directional, not a contract. Order is firm; timing is not. To influence it, open an issue or a discussion.
 
@@ -73,7 +73,7 @@ Fixed the two launch-critical hook bugs: missing top-level `hooks` wrapper in `h
 
 ---
 
-### 🧭 v1.3.0 — Speak the industry's language
+### ✅ v1.3.0 — Speak the industry's language
 
 **Narrative.** ForgeProof's `.rpack` proves integrity, but only to ForgeProof's own verifier. Supply-chain security has standardized how attestations are expressed — in-toto, SLSA, DSSE — and those formats are the industry's shared language even as the regulation around them shifts (the US federal secure-development attestation mandate was rescinded by OMB M-26-05 in January 2026, leaving NIST's SSDF as the voluntary reference standard; the EU Cyber Resilience Act phases in through 2027 and never mandates these formats). This release makes every bundle *also* a standards-conformant attestation: evidence expressed in the language reviewers and tooling already speak, verifiable with tools the industry already trusts. It does not confer compliance on anyone — the compliance-mapping doc states exactly what the output maps to and where the limits are.
 
