@@ -17,6 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -4666,6 +4667,7 @@ class TestFormatIdentity:
     load-bearing sentences true of the engine and of every frozen fixture."""
 
     SPEC_PATH = "skills/run/references/rpack-format.md"
+    SCHEMA_PATH = "schemas/forgeproof-rpack-1.schema.json"
     MEDIA_TYPE_DOC = PLUGIN_ROOT / "docs" / "media-type.md"
     FIXTURE_BUNDLES = (
         FIXTURE_V101 / "issue-999.rpack",
@@ -4712,6 +4714,56 @@ class TestFormatIdentity:
             json.loads(rpack.read_text(encoding="utf-8"),
                        parse_float=floats.append)
             assert floats == [], f"{rpack.name} carries non-integer numbers"
+
+    def test_schema_is_structurally_sane(self):
+        """The published JSON Schema, checked with the stdlib alone (the
+        pinned validator runs in one CI job only, stress/validate_schema.py):
+        an immutable identity, the engine's own constants, and the spec's
+        tolerances — unknown members at every level, an optional attestation,
+        and mediaType / verificationMaterial described but never required or
+        constrained ("What binds a verifier")."""
+        schema = json.loads((PLUGIN_ROOT / self.SCHEMA_PATH).read_text(
+            encoding="utf-8"))
+        assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+        schema_id = urlsplit(schema["$id"])
+        assert schema_id.scheme == "https" and schema_id.netloc
+        assert "#" not in schema["$id"]
+        assert schema_id.path.endswith("/" + self.SCHEMA_PATH)
+
+        props = schema["properties"]
+        assert props["format"]["const"] == fp.RPACK_FORMAT
+        pattern = props["version"]["pattern"]
+        for version in sorted(fp.KNOWN_RPACK_VERSIONS):
+            assert re.search(pattern, version), version
+        assert not re.search(pattern, "2.0.0")
+        assert "attestation" not in schema["required"]
+
+        tolerated = {"mediaType", "verificationMaterial"}
+
+        def walk(node):
+            if isinstance(node, (dict, list)):
+                yield node
+                for child in (node.values() if isinstance(node, dict) else node):
+                    yield from walk(child)
+
+        for node in walk(schema):
+            if isinstance(node, dict):
+                assert node.get("additionalProperties") is not False
+                assert node.get("unevaluatedProperties") is not False
+            else:  # required, dependentRequired, enum: no list may name them
+                assert not tolerated & {v for v in node if isinstance(v, str)}
+
+        attestation = props["attestation"]
+        if "$ref" in attestation:
+            assert attestation["$ref"].startswith("#/")
+            target = schema
+            for part in attestation["$ref"][2:].split("/"):
+                target = target[part]
+            attestation = target
+        assert attestation["required"] == ["dsseEnvelope"]
+        for name in sorted(tolerated):
+            assert set(attestation["properties"][name]) <= {
+                "$comment", "description", "title"}, name
 
     def test_format_marker_in_prefix(self, tmp_path, monkeypatch, capsys):
         """Emission profile item 1, which the detection rules key on: `{` at

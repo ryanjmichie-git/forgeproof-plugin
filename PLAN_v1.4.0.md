@@ -277,8 +277,8 @@ Note on EOL: git EOL conversion of a user's `.rpack` does **not** break verifica
 
 **T3-2 — Published JSON Schema.**
 - Rationale: a machine-readable description at a stable, immutable URL; the schema's acceptance tests need all four fixtures (T0).
-- Files: `schemas/forgeproof-rpack-1.schema.json` (Appendix C); `stress/validate_schema.py` (CI driver, imports `jsonschema` — never imported by the engine or the tests); `.github/jsonschema-requirements.txt` (`jsonschema==4.26.0` + transitive pins with `--hash` lines, generated once with pip-compile `--generate-hashes`); `TestFormatIdentity.test_schema_is_structurally_sane` (stdlib).
-- Acceptance (CI, `format-identity` job): the four fixtures, a fresh bundle from `stress/make_bundle.py`, and the fresh bundle with an extra unknown top-level member all **validate**; wrong `format`, missing `signature`, `version: "2.0.0"`, `attestation` with two signatures, `evaluation.tests_passed: 1.5` all **fail**. Stdlib test: `$schema` is the 2020-12 URI; `$id` is absolute, fragment-free, and its path ends with the schema's own repo path; `properties.format.const == fp.RPACK_FORMAT`; every member of `fp.KNOWN_RPACK_VERSIONS` matches `properties.version.pattern`; `attestation` not in `required`; no `additionalProperties: false` anywhere.
+- Files: `schemas/forgeproof-rpack-1.schema.json` (Appendix C); `stress/validate_schema.py` (CI driver, imports `jsonschema` — never imported by the engine or the tests); `.github/jsonschema-requirements.txt` (`jsonschema==4.26.0` + transitive pins with `--hash` lines, generated once with pip-compile `--generate-hashes` — *corrected 2026-09-20:* generated with `uv pip compile --generate-hashes --universal --python-version 3.11`, uv being the house tool: one universal file installs with `--require-hashes` on the CI runner (ubuntu, Python 3.11) and on a maintainer's Windows box); `TestFormatIdentity.test_schema_is_structurally_sane` (stdlib).
+- Acceptance (CI, `format-identity` job): the four fixtures, a fresh bundle from `stress/make_bundle.py`, and the fresh bundle with an extra unknown top-level member all **validate**; wrong `format`, missing `signature`, `version: "2.0.0"`, `attestation` with two signatures, `evaluation.tests_passed: 1.5` all **fail**. Stdlib test: `$schema` is the 2020-12 URI; `$id` is absolute, fragment-free, and its path ends with the schema's own repo path; `properties.format.const == fp.RPACK_FORMAT`; every member of `fp.KNOWN_RPACK_VERSIONS` matches `properties.version.pattern`; `attestation` not in `required`; no `additionalProperties: false` anywhere. *Corrected 2026-09-20 (two decisions by Ryan, made after this text was written; nothing above is withdrawn):* (1) **What the schema describes** — the specification's member table: what a valid format-1.x document looks like. It relaxes only where the specification tells verifiers to tolerate something: unknown members at every level, `mediaType`, and `verificationMaterial` (Appendix C). It is not "whatever `verify` accepts": the reference verifier tolerates more than the member table allows (an unrecognized `version`, for instance, is one warning and never an error), and the schema does not follow it there — the five negatives above stay exactly as written. (2) **One more acceptance case** — a document whose `attestation` has no `mediaType` and no `verificationMaterial` **validates** (a driver positive), and the stdlib test also asserts that the attestation sub-schema's `required` is exactly `["dsseEnvelope"]` and that `mediaType` / `verificationMaterial` carry no constraining keyword, so that nothing can quietly make them required again. The driver additionally requires each negative to fail for its intended reason: exactly one validation error, at the expected instance path, from the expected keyword.
 - Scope: `.rpack` only; chain file deferred (triage). Principle 1, 2. Milestone v1.4.0.
 
 **T3-3 — `.gitattributes` Linguist mapping (plugin repo) + documented user snippet.**
@@ -764,6 +764,8 @@ Skeleton only: `$schema`, `$id`, the eleven required members with types from E14
 
 *Corrected 2026-09-20 (one change inside the block, in `$defs.sigstoreBundle`):* `required` was `["mediaType", "verificationMaterial", "dsseEnvelope"]`, `mediaType` carried a pattern, and `verificationMaterial` was `{"type": "object"}`. The schema matches the **verifier**, not the producer's output: the reference verifier accepts a document whose `mediaType` is absent or arbitrary and whose `verificationMaterial` is absent, populated, or not an object (probed), and the spec's "What binds a verifier" forbids rejecting a document over either. So `required` is now `["dsseEnvelope"]` and the two members are described, not constrained. Everything the verifier does enforce stays — `payloadType`, padded-base64 `payload`, exactly one signature object with a string `sig` — so T3-2's negative "`attestation` with two signatures" still fails.
 
+*Corrected 2026-09-20 (second note; Ryan's decision, recorded with Phase 2):* "matches the verifier" above is scoped to the attestation wrapper. The schema as a whole describes the specification's member table and relaxes only where the specification tells verifiers to tolerate something — unknown members at every level, `mediaType`, `verificationMaterial`; it is not "whatever `verify` accepts" (T3-2). The published file is the block below with `description` annotations taken from the member table and no further constraining keyword; `test_schema_is_structurally_sane` pins `required == ["dsseEnvelope"]` and annotation-only `mediaType` / `verificationMaterial`. *Corrected 2026-09-20:* the four `"minimum": 0` keywords this block carried (on `issue.number`, `tests_passed`, `tests_failed`, `lint_errors`) were removed, because the specification's member table says "integer" with no sign restriction and a released engine (v1.1.0) can emit a negative count in a bundle that every verifier passes.
+
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -777,7 +779,7 @@ Skeleton only: `$schema`, `$id`, the eleven required members with types from E14
     "version":      { "type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$" },
     "format":       { "const": "forgeproof-rpack" },
     "issue":        { "type": "object", "required": ["number", "title", "url"],
-                      "properties": { "number": { "type": "integer", "minimum": 0 },
+                      "properties": { "number": { "type": "integer" },
                                       "title": { "type": "string" }, "url": { "type": "string" } } },
     "requirements": { "type": "array", "items": { "type": "object",
                       "required": ["id", "text", "status", "tests"],
@@ -797,9 +799,9 @@ Skeleton only: `$schema`, `$id`, the eleven required members with types from E14
                       "required": ["status", "tests_passed", "tests_failed", "lint_errors",
                                    "requirement_coverage", "uncovered_requirements", "failed_tests"],
                       "properties": { "status": { "enum": ["pass", "partial", "fail"] },
-                                      "tests_passed": { "type": "integer", "minimum": 0 },
-                                      "tests_failed": { "type": "integer", "minimum": 0 },
-                                      "lint_errors":  { "type": "integer", "minimum": 0 },
+                                      "tests_passed": { "type": "integer" },
+                                      "tests_failed": { "type": "integer" },
+                                      "lint_errors":  { "type": "integer" },
                                       "requirement_coverage": { "type": "string" },
                                       "uncovered_requirements": { "type": "array", "items": { "type": "string" } },
                                       "failed_tests": { "type": "array", "items": { "type": "string" } } } },
