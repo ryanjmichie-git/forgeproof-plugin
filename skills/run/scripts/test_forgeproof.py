@@ -4822,6 +4822,19 @@ class TestFormatIdentity:
             assert not re.search(pattern, engine), tool
             assert not re.search(pattern, preflight), tool
 
+    def test_skills_never_write_repo_config(self):
+        """Zero footprint: repository, desktop, and editor configuration is
+        documented for users (README, docs/media-type.md) and never performed
+        — no skill names the files or the tools that would do it."""
+        skills = sorted(SKILLS_DIR.glob("*/SKILL.md"))
+        assert {"push", "reset", "run", "verify"} <= {
+            s.parent.name for s in skills}
+        for skill_md in skills:
+            text = skill_md.read_text(encoding="utf-8")
+            for token in (".gitattributes", "update-mime-database",
+                          "xdg-mime", "files.associations"):
+                assert token not in text, f"{skill_md.parent.name}: {token}"
+
     def test_forbidden_phrases(self):
         """Registration confers no trust, and nothing may claim it happened
         before it has: the status lives on ONE ledger line in

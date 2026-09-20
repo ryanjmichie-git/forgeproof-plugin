@@ -2,6 +2,95 @@
 
 All notable changes to ForgeProof are documented in this file.
 
+## [1.4.0] - 2026-09-20
+
+"A name of its own." **No bundle byte changed**: the bundle format stays at
+1.1.0, no member is added, removed, or re-typed, and the code that writes,
+canonicalizes, signs, and verifies a bundle is untouched. (A bundle written
+by this release differs from a v1.3.0 one only where its attestation records
+the plugin version.) What the release adds is around the format, not in it:
+a normative specification, a published JSON Schema, opt-in detection files,
+and a media type name — `application/vnd.forgeproof.rpack+json` (vendor
+tree; proposed, status in `docs/media-type.md`). A name is not a trust
+signal: it changes nothing about what a bundle proves.
+
+Every prior `.rpack` still verifies with zero errors and zero warnings,
+strict mode included, now enforced in CI by **four** frozen fixtures (v1.0.1,
+v1.1.0, v1.2.2, v1.3.0 engines). **forgeproof-verify v1.1.0 remains current
+— the verifier is unchanged.**
+
+### Added
+
+- **Normative specification.** `skills/run/references/rpack-format.md` — same
+  path, same `#slsa-buildtype-v1` anchor, both sealed into every attestation
+  — is now the normative description of the format: a stability statement,
+  an identity section, what is normative for *validity* (the member table,
+  the exact canonical serialization behind `root_digest`, the canonical
+  SSHSIG rule, and the four attestation checks that bind a verifier) kept
+  apart from what is normative for *emission* (bytes on disk: `version` then
+  `format` first, which puts the `format` marker within the first 256 bytes;
+  UTF-8 without BOM; LF or CRLF), the verification requirements (Python
+  3.11+ stdlib plus `ssh-keygen`), and a format-bump checklist.
+- **JSON Schema for format 1.x** at `schemas/forgeproof-rpack-1.schema.json`
+  (2020-12), with an immutable tag-pinned `$id`. It describes the
+  specification's member table, allows unknown members at every level, and
+  never infers a member from `version`; `attestation` is optional, and when
+  present only `dsseEnvelope` is required of it. `verify` never reads the
+  schema. Proven against the four frozen fixtures and fresh bundles only:
+  v1.0.x engines accepted free-form record data, so no claim is made that
+  every historical bundle validates.
+- **Opt-in detection files**: `share/mime/packages/forgeproof-rpack.xml`
+  (shared-mime-info) and `share/magic/forgeproof` (libmagic). **ForgeProof
+  never installs them** and never runs `update-mime-database` or `xdg-mime`;
+  the manual recipes are in `docs/media-type.md`, with the limits stated
+  up front: plain `file` prints `application/json` unless told `-e json`,
+  and a key-sorted or BOM-prefixed copy is recognized by its file name only.
+- **`docs/media-type.md`**: the one ledger line that records where the media
+  type's registration stands (today: not yet submitted), the RFC 6838 §5.6
+  template as it will be submitted, what a registration does and does not
+  change (trust, verification, GitHub: nothing), the detection recipes, the
+  `.gitattributes` and editor snippets, and the known limits. Every other
+  surface uses the bare type name and points there.
+- **`format-identity` CI job**, the only place the consumer-side tools run
+  (`jsonschema==4.26.0` installed with `--require-hashes`; `shared-mime-info`,
+  `gio`, `file` with versions printed). It asserts that the four fixtures, a
+  fresh bundle, and two tolerated variants validate against the schema and
+  that five invalid documents fail for their intended reason; that the XML
+  and the magic rule detect every fixture and a fresh bundle as written, with
+  CRLF line endings, and compact; and that the documented limits hold.
+- **Fourth frozen compat fixture** (`fixtures/v130/`, v1.3.0 engine, format
+  1.1.0) — the first with an attestation: green lenient and strict with zero
+  warnings, the three attestation checks `ok`, four tamper cases red.
+- `.gitattributes`: `*.rpack linguist-language=JSON`, so bundles in this
+  repo render as JSON on GitHub; the same optional line is documented for
+  user repos. ForgeProof never writes it for you.
+- 21 tests (290 → 311): `TestV130Compat` and `TestFormatIdentity` — spec path
+  and anchor frozen, canonical form matches the spec, no floats in any
+  fixture, the format marker within the first 256 bytes, schema structure,
+  one spelling of the type across every surface, consumer-side tools absent
+  from the engine, no skill touches repo or desktop configuration, and the
+  registration-wording sweep with its one-ledger-line rule.
+
+### Changed
+
+- `README.md`: a "Format identity" section, the `verify` requirement stated
+  in one sentence, fixture and test counts refreshed.
+- `PRIVACY.md` **corrects an omission**: from v1.3.0 the attestation carries
+  `startedOn` / `finishedOn` (the first and last chain block times), and the
+  chain file has always recorded a time per block. Not a new disclosure —
+  the data was already there; the policy now lists it. The "does not" list
+  gains the MIME / `.gitattributes` / editor-settings line.
+- `ROADMAP.md`: v1.4.0 is this release; the keyless-signing milestone moves
+  to v1.5.0 and attested review to v1.6.0 (order unchanged).
+
+### Compatibility
+
+- `hooks/hooks.json` and every `SKILL.md` byte-identical to v1.3.0; no new
+  preflight requirement; nothing new is installed, required, or run on a
+  user's machine.
+- Engine remains a single stdlib-only file with no new import; the schema
+  validator and the MIME tools are CI-only and never named in it.
+
 ## [1.3.0] - 2026-08-15
 
 "Speak the industry's language." Every bundle now *also* carries a

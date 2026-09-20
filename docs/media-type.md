@@ -270,6 +270,16 @@ The shared-mime-info test-list line, recorded here for the merge request the [ch
 issue-996.rpack application/vnd.forgeproof.rpack+json
 ```
 
+## GitHub rendering
+
+GitHub renders a `.rpack` as JSON if the repository's `.gitattributes` carries this line:
+
+```
+*.rpack linguist-language=JSON
+```
+
+Optional and cosmetic: it changes how GitHub highlights the file; verification is unaffected either way, and no `-text` is needed for bundles.
+
 ## Editor association
 
 Optional and cosmetic: editors treat `.rpack` as plain text unless told otherwise. In VS Code, add to your user or workspace `settings.json`:

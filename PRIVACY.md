@@ -153,6 +153,7 @@ An `.rpack` bundle contains:
 | Signature | Ed25519 signature over the root digest | Low (verification data) |
 | Attestation (v1.3.0+) | in-toto/SLSA statement: the same issue/requirements/artifact data, builder identity (model id self-reported, Claude Code version, plugin version), and approval events | Medium (see approver email below) |
 | Approver email (v1.3.0+) | `git config user.email` of the local user, recorded in each `approval` chain block and sealed into the attestation | Medium (personal identifier; empty string when git has no configured identity) |
+| Timestamps (v1.3.0+) | The attestation's `startedOn` / `finishedOn`: the times of the run's first and last chain blocks (UTC, to the microsecond). Earlier bundles carry no timestamps. The chain file beside the bundle (`.forgeproof/chain-<N>.json`) has always recorded a time for every block | Low (when the run happened) |
 
 The bundle does **not** contain:
 - Source code content (only file paths and hashes)
