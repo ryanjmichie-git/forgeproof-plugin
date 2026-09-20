@@ -4653,3 +4653,195 @@ class TestVerifyAttestation:
             # New markers must not collide with the legacy substring traps.
             assert "hash mismatch" not in marker
             assert "prev_hash" not in marker
+
+
+# ---------------------------------------------------------------------------
+# v1.4.0 — format identity: the normative spec, the emission profile, and the
+# registration wording discipline
+# ---------------------------------------------------------------------------
+
+
+class TestFormatIdentity:
+    """rpack-format.md is the normative specification; these tests keep its
+    load-bearing sentences true of the engine and of every frozen fixture."""
+
+    SPEC_PATH = "skills/run/references/rpack-format.md"
+    MEDIA_TYPE_DOC = PLUGIN_ROOT / "docs" / "media-type.md"
+    FIXTURE_BUNDLES = (
+        FIXTURE_V101 / "issue-999.rpack",
+        FIXTURE_V110 / "issue-998.rpack",
+        FIXTURE_V122 / "issue-997.rpack",
+        FIXTURE_V130 / "issue-996.rpack",
+    )
+
+    def test_spec_anchor_frozen(self):
+        """The spec's path and the buildType heading are sealed into every
+        attestation (predicate.buildDefinition.buildType) — neither may move,
+        and no second heading may take over the anchor slug."""
+        assert fp.FORGEPROOF_BUILD_TYPE.endswith(
+            f"/{self.SPEC_PATH}#slsa-buildtype-v1")
+        lines = (PLUGIN_ROOT / self.SPEC_PATH).read_text(
+            encoding="utf-8").splitlines()
+        headings = [line for line in lines if line.startswith("#")
+                    and line.lstrip("#").strip().lower() == "slsa buildtype v1"]
+        assert headings == ["### SLSA buildType v1"]
+
+    def test_canonical_form_matches_spec(self):
+        """The spec defines the canonical serialization by one exact
+        expression; the engine must agree with it: members sorted by code
+        point (not UTF-16 code unit), compact, everything outside printable
+        ASCII escaped."""
+        spec_text = (PLUGIN_ROOT / self.SPEC_PATH).read_text(encoding="utf-8")
+        assert ('`json.dumps(obj, sort_keys=True, separators=(",", ":"))`'
+                in spec_text)
+        nested = {"b": [2, {"z": 1, "a": "\xe9\U00002713"}],
+                  "\U0001f600": None, "\U0000fffd": True,
+                  "a": {"d": -1, "c": "\x7f/"}}
+        expected = ('{"a":{"c":"\\u007f/","d":-1},'
+                    '"b":[2,{"a":"\\u00e9\\u2713","z":1}],'
+                    '"\\ufffd":true,"\\ud83d\\ude00":null}')
+        assert json.dumps(nested, sort_keys=True,
+                          separators=(",", ":")) == expected
+        assert fp.canonical_json(nested) == expected
+
+    def test_no_floats_in_fixtures(self):
+        """The spec says every number is an integer (float formatting is
+        implementation-defined, so it has no place in a canonical form)."""
+        for rpack in self.FIXTURE_BUNDLES:
+            floats: list[str] = []
+            json.loads(rpack.read_text(encoding="utf-8"),
+                       parse_float=floats.append)
+            assert floats == [], f"{rpack.name} carries non-integer numbers"
+
+    def test_format_marker_in_prefix(self, tmp_path, monkeypatch, capsys):
+        """Emission profile item 1, which the detection rules key on: `{` at
+        byte 0 and the format marker within the first 256 bytes — for every
+        frozen fixture and for whatever the writer emits on this platform."""
+        markers = (b'"format": "forgeproof-rpack"', b'"format":"forgeproof-rpack"')
+
+        def conforms(data: bytes) -> bool:
+            return data[:1] == b"{" and any(m in data[:256] for m in markers)
+
+        for rpack in self.FIXTURE_BUNDLES:
+            assert conforms(rpack.read_bytes()), rpack.name
+        fresh = _real_attested_run(tmp_path, monkeypatch, capsys)
+        assert conforms(fresh["rpack"].read_bytes())
+
+    def test_forbidden_phrases(self):
+        """Registration confers no trust, and nothing may claim it happened
+        before it has: the status lives on ONE ledger line in
+        docs/media-type.md, and that line is the only place the words
+        "registered with IANA" may ever appear. The PLAN_v* records and this
+        file are skipped — they quote the list in order to define it."""
+        forbidden = ("iana-approved", "approved by iana", "iana approved",
+                     "iana-registered", "official media type",
+                     "standardized media type")
+        claim = "registered with iana"
+        ledger = [line for line in self.MEDIA_TYPE_DOC.read_text(
+            encoding="utf-8").splitlines() if "Registration status:" in line]
+        assert len(ledger) == 1, "docs/media-type.md must carry ONE ledger line"
+        assert ledger[0].startswith(
+            "Media type: `application/vnd.forgeproof.rpack+json` "
+            "(vendor tree). Registration status: ")
+        offenders = []
+        for root, dirs, files in os.walk(PLUGIN_ROOT):
+            dirs[:] = [d for d in dirs if d in (".github", ".claude-plugin")
+                       or not (d.startswith(".") or d == "__pycache__")]
+            for name in files:
+                path = Path(root) / name
+                if path == Path(__file__).resolve() or (
+                        Path(root) == PLUGIN_ROOT and name.startswith("PLAN_v")):
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    continue  # not a text file
+                flat = " ".join(text.lower().split())
+                hits = [p for p in forbidden if p in flat]
+                allowed = (ledger[0].lower().count(claim)
+                           if path == self.MEDIA_TYPE_DOC else 0)
+                if flat.count(claim) > allowed:
+                    hits.append(claim)
+                if hits:
+                    offenders.append(f"{path.relative_to(PLUGIN_ROOT)}: {hits}")
+        assert offenders == []
+
+    def test_attestation_wrapper_tolerance_matches_spec(
+            self, tmp_path, monkeypatch, capsys):
+        """The spec's "What binds a verifier": a verifier MUST NOT reject a
+        document over extra members of the signature object, the value of
+        mediaType, or the presence or contents of verificationMaterial — that
+        member is opaque to the format (a later producer may populate it)."""
+        def add_keyid(b):
+            b["attestation"]["dsseEnvelope"]["signatures"][0]["keyid"] = "abc"
+
+        def certificate_material(b):
+            b["attestation"]["verificationMaterial"] = {
+                "certificate": {"rawBytes": "AAAA"},
+                "tlogEntries": [{"logIndex": "1"}]}
+
+        def drop_material(b):
+            del b["attestation"]["verificationMaterial"]
+
+        def other_media_type(b):
+            b["attestation"]["mediaType"] = "application/x-anything"
+
+        for i, mutate in enumerate((add_keyid, certificate_material,
+                                    drop_material, other_media_type)):
+            proj, rpack = _attested_deploy(tmp_path / str(i))
+            _retamper_attested(rpack, mutate_bundle=mutate)
+            monkeypatch.chdir(proj)
+            for mode in ([], ["--strict"]):
+                code, out = _run_verify(["--rpack", str(rpack), *mode], capsys)
+                output = json.loads(out)
+                assert (code, output["errors"]) == (0, []), mutate.__name__
+                statuses = {c["name"]: c["status"] for c in output["checks"]}
+                assert statuses["attestation_signature"] == "ok", mutate.__name__
+
+    def test_verify_resolves_recorded_paths_as_given(
+            self, tmp_path, monkeypatch, capsys):
+        """Pins a DOCUMENTED LIMITATION of the reference verifier, not a
+        feature: verify confines neither the recorded artifact paths nor the
+        chain-file name it builds from issue.number to the project root, in
+        any mode (docs/media-type.md, security considerations — which is why
+        that text says SHOULD and says what the verifier does). When verify
+        is hardened, change this test and that text together."""
+        outside = tmp_path / "outside" / "secret.txt"
+        outside.parent.mkdir()
+        outside.write_text("outside the project root\n", encoding="utf-8")
+        for i, recorded in enumerate((outside.as_posix(),
+                                      "../../outside/secret.txt")):
+            proj = tmp_path / str(i) / "proj"
+            rpack = _deploy_v12_project(proj)
+            bundle = json.loads(rpack.read_text(encoding="utf-8"))
+            bundle["artifacts"] = [{"path": recorded, "operation": "modify",
+                                    "sha256": fp.sha256_file(outside)}]
+            _sign_bundle(bundle)
+            rpack.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+            monkeypatch.chdir(proj)
+            for mode in ([], ["--strict"]):
+                code, out = _run_verify(["--rpack", str(rpack), *mode], capsys)
+                output = json.loads(out)
+                assert (code, output["errors"]) == (0, []), recorded
+                assert output["artifacts_checked"] == 1, recorded
+                assert output["artifacts_missing"] == 0, recorded
+
+        # The chain-file leg: the only chain file lives OUTSIDE the project,
+        # and a string issue.number steers the read to it. (POSIX resolves
+        # "chain-1/.." only if that directory exists; Windows needs nothing.)
+        proj = tmp_path / "chain" / "proj"
+        rpack = _deploy_v12_project(proj)
+        (proj / ".forgeproof" / "chain-1").mkdir()
+        shutil.move(str(proj / ".forgeproof" / "chain-1.json"),
+                    str(tmp_path / "outside" / "stolen.json"))
+        bundle = json.loads(rpack.read_text(encoding="utf-8"))
+        bundle["issue"]["number"] = "1/../../../../outside/stolen"
+        _sign_bundle(bundle)
+        rpack.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        monkeypatch.chdir(proj)
+        for mode in ([], ["--strict"]):
+            code, out = _run_verify(["--rpack", str(rpack), *mode], capsys)
+            output = json.loads(out)
+            assert (code, output["errors"], output["warnings"]) == (0, [], [])
+            statuses = {c["name"]: c["status"] for c in output["checks"]}
+            assert statuses["chain_hash"] == "ok"

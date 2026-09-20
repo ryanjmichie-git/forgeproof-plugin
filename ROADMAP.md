@@ -112,6 +112,7 @@ Fixed the two launch-critical hook bugs: missing top-level `hooks` wrapper in `h
 - **Optional Sigstore keyless signing tier** (Fulcio certificates, Rekor transparency log) for signing; stdlib Ed25519 remains the zero-dependency default.
 - **Identity display in verify output:** who (which identity) signed, per block or per bundle.
 - **Key lifecycle docs:** rotation, revocation posture, and how the two tiers coexist in one chain.
+- **Verify hardening:** confine recorded artifact paths and the chain-file path to the project root without turning any genuine v1.0.x bundle red (compatibility is forever); the PR gate accepts a UTF-8 byte-order mark like `verify` does; clean errors instead of tracebacks on undecodable input.
 
 **Success criteria:** a keyless-signed bundle's identity is independently confirmable via Rekor; baseline verification still requires nothing but stdlib.
 

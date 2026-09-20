@@ -195,7 +195,7 @@ Provenance caveat: `gitlab.freedesktop.org` is behind an Anubis proof-of-work wa
 4. **Wording states** are exact (D11); nothing claims registration until IANA confirms.
 5. **Version discipline.** `.claude-plugin/plugin.json` and `PLUGIN_VERSION` change only in the release commit, as the final step.
 6. **Plan mode.** Nothing in this document is implemented in this session.
-7. **The spec's path and anchor are frozen**: `skills/run/references/rpack-format.md` and its heading `## SLSA buildType v1` (anchor `#slsa-buildtype-v1`) are sealed into every attestation's `buildType` (E9). A test guards both.
+7. **The spec's path and anchor are frozen**: `skills/run/references/rpack-format.md` and its heading `## SLSA buildType v1` (anchor `#slsa-buildtype-v1`; *corrected 2026-09-20:* the heading in the file is, and always was, third-level — `### SLSA buildType v1` — with the same anchor) are sealed into every attestation's `buildType` (E9). A test guards both.
 8. **Zero footprint.** PRIVACY.md `:96-100`: ForgeProof does not write outside the project root and system temp. The plugin never installs MIME definitions, never runs `update-mime-database`/`xdg-mime`, never writes `.gitattributes` or editor settings into a user's repo. Detection files ship as opt-in artifacts with a manual recipe only.
 9. **Ryan signs off every external submission** (IANA form text, any upstream MR or e-mail, and every reply in their review loops) before it is sent.
 10. **Engine untouched** except the release-commit `PLUGIN_VERSION` bump and the `:530` docstring renumber; single-file engine; `test_engine_source_has_no_shell_isms` unchanged.
@@ -226,7 +226,7 @@ v1.4.0 gives the `.rpack` bundle a name and a normative description without chan
 
 **D7 — Promote `rpack-format.md` in place; split the paperwork out.** Alternatives: move to `docs/` or `SPEC.md`; GitHub Pages; everything in the spec. Rationale: E9 freezes the path and anchor; E10 makes every added byte a per-run token cost. The spec gains only normative content (§7 T3-1); the registration template, status ledger, install recipes, editor snippets, and limitations go to a new `docs/media-type.md` (the `docs/cosign-interop.md` precedent for consumer-side recipes). Principle 2 (lean runtime surface).
 
-**D8 — One schema for format 1.x, shallow on `attestation`, CI-validated.** Alternatives: one schema per format version; a deep Sigstore/DSSE schema; ship unvalidated. Rationale: a per-version schema would encode a version→member implication the engine rejects by design (PLAN_v1.3.0 finding 12). `attestation` is optional regardless of `version`, required to have the Sigstore-bundle shape **when present**, with `verificationMaterial` left untyped (owned by the Sigstore format; the keyless tier will populate it). Unknown members allowed at every level (additive forever). `$id` per RQ7; validation per RQ8; the stdlib structural test keeps the matrix honest without a validator. Principle 1, 2.
+**D8 — One schema for format 1.x, shallow on `attestation`, CI-validated.** Alternatives: one schema per format version; a deep Sigstore/DSSE schema; ship unvalidated. Rationale: a per-version schema would encode a version→member implication the engine rejects by design (PLAN_v1.3.0 finding 12). `attestation` is optional regardless of `version`, required to have the Sigstore-bundle shape **when present**, with `verificationMaterial` left untyped (owned by the Sigstore format; the keyless tier will populate it) — *corrected 2026-09-20:* the schema matches the **verifier**, not the producer's output: when present, `attestation` is required to have only the shape the reference verifier enforces (`dsseEnvelope`: `payloadType`, padded-base64 `payload`, exactly one signature object with a string `sig`); `mediaType` and `verificationMaterial` are described but neither required nor constrained, because the verifier reads neither and the spec forbids rejecting a document over them (Appendix C). Unknown members allowed at every level (additive forever). `$id` per RQ7; validation per RQ8; the stdlib structural test keeps the matrix honest without a validator. Principle 1, 2.
 
 **D9 — Emission profile: MUST for the reference producer, SHOULD for others, never binding on verifiers.** Alternatives: MUST for all producers; no clause; fixed-offset magic. Rationale: E1–E4 and the six-way experiment: the byte layout is an emission property; the reference writer already conforms (`format` at byte 26/28) and a test pins it; the clause constrains producers and never the verifier or existing bundles, so it is compatibility-safe. RFC 6838 §4.4's "single, canonical data format" (R4) is satisfied by the one data model; ForgeProof's *digest* canonicalization is a separate, fully specified serialization. Detection keys on the profile: reliable for profile output, best-effort otherwise — stated verbatim in Appendix B and the spec. Principle 1.
 
@@ -271,7 +271,7 @@ Note on EOL: git EOL conversion of a user's `.rpack` does **not** break verifica
 
 **T3-1 — Promote `rpack-format.md` to the normative specification.**
 - Rationale: the dependency for the emission clause (T2) and the "Published specification" field (T1); today it says "Version: 1.1.0" and documents the schema, but has no stability statement and never separates validity from bytes on disk.
-- File: `skills/run/references/rpack-format.md` — **path and the `## SLSA buildType v1` heading unchanged** (constraint 7). Additions, in order: (1) *Status and stability* — "This document is the normative specification of the format. Format versions are additive; `KNOWN_RPACK_VERSIONS` membership; verifiers accept every historical version forever." (2) *Identity* — `format` const, `version`, media type name + pointer to the ledger (D11), file extension `.rpack` with the collision sentence. (3) *Validity (normative)* — the parsed-object model (member table with types from E14: integers only, `requirement_coverage` string), **canonical serialization defined exactly**: members sorted by code point, separators `,` and `:`, non-ASCII escaped as `\uXXXX`, UTF-8 (i.e. Python `json.dumps(obj, sort_keys=True, separators=(",", ":"))`); `root_digest` = SHA-256 hex of the canonical serialization of the object minus `root_digest` and `signature`; `signature` = canonical SSHSIG armor (no leading/trailing bytes) over the `root_digest` string under namespace `forgeproof`, verified against `public_key`; `chain_hash` derivation caveat kept; attestation invariants (existing text). (4) *Emission profile (normative for the reference producer)* — the verbatim clause in Appendix B. (5) *Verification requirements* — "Python 3.11+ stdlib plus OpenSSH `ssh-keygen` ≥ 8.0 for the SSHSIG check; the attestation check needs the stdlib only; cosign is optional." (6) *Format-bump checklist* — a future 1.2.0 must: add to `KNOWN_RPACK_VERSIONS`, freeze a fixture, re-issue the schema `$id`, update the IANA registration (RFC 6838 §5.5). Everything registration-related beyond the one identity paragraph goes to `docs/media-type.md`.
+- File: `skills/run/references/rpack-format.md` — **path and the `## SLSA buildType v1` heading unchanged** (constraint 7; *corrected 2026-09-20:* the real heading is `### SLSA buildType v1`, same anchor). Additions, in order: (1) *Status and stability* — "This document is the normative specification of the format. Format versions are additive; `KNOWN_RPACK_VERSIONS` membership; verifiers accept every historical version forever." (2) *Identity* — `format` const, `version`, media type name + pointer to the ledger (D11), file extension `.rpack` with the collision sentence. (3) *Validity (normative)* — the parsed-object model (member table with types from E14: integers only, `requirement_coverage` string), **canonical serialization defined exactly**: members sorted by code point, separators `,` and `:`, non-ASCII escaped as `\uXXXX`, UTF-8 (i.e. Python `json.dumps(obj, sort_keys=True, separators=(",", ":"))`); `root_digest` = SHA-256 hex of the canonical serialization of the object minus `root_digest` and `signature`; `signature` = canonical SSHSIG armor (no leading/trailing bytes) over the `root_digest` string under namespace `forgeproof`, verified against `public_key`; `chain_hash` derivation caveat kept; attestation invariants (existing text) — *corrected 2026-09-20:* the existing layout text is the reference producer's emission contracts, not validity rules (the verifier enforces neither "no `keyid`" nor the exact `verificationMaterial`); the spec states the verifier-binding subset separately ("What binds a verifier") and declares `verificationMaterial` opaque, as RQ1 and D8 assume. (4) *Emission profile (normative for the reference producer)* — the verbatim clause in Appendix B. (5) *Verification requirements* — "Python 3.11+ stdlib plus OpenSSH `ssh-keygen` ≥ 8.0 (*corrected 2026-09-20:* **≥ 8.1** — `ssh-keygen -Y sign`/`verify` first shipped in OpenSSH 8.1, released 2019-10-09, per https://www.openssh.com/txt/release-8.1; the 8.0 release notes carry no such entry) for the SSHSIG check; the attestation check needs the stdlib only; cosign is optional." (6) *Format-bump checklist* — a future 1.2.0 must: add to `KNOWN_RPACK_VERSIONS`, freeze a fixture, re-issue the schema `$id`, update the IANA registration (RFC 6838 §5.5). Everything registration-related beyond the one identity paragraph goes to `docs/media-type.md`.
 - Acceptance: `test_spec_anchor_frozen` (the file exists at the sealed path; contains the exact heading; `fp.FORGEPROOF_BUILD_TYPE` ends with `#slsa-buildtype-v1`); `test_canonical_form_matches_spec` (the spec's canonical-serialization sentence agrees with `fp.canonical_json` on a nested fixture: sorted, compact, `\uXXXX`); `test_no_floats_in_fixtures` (all four); `test_forbidden_phrases` (D11) passes; the run-skill reference list (`SKILL.md:263-268`) unchanged.
 - Principle 1, 2, 3. Milestone v1.4.0.
 
@@ -457,12 +457,13 @@ Commit: `release: v1.4.0 — a name of its own`
 - [ ] `PLAN_format_identity.md` renamed to `PLAN_v1.4.0.md` and committed (Phase 0, first action)
 - [ ] `fixtures/v130/` frozen with the unmodified v1.3.0 engine (LF, issue 996); `TestV130Compat` green with `attestation*` = `ok` and `warnings == []` in both modes
 - [ ] ROADMAP: v1.4.0 block added as 🧭, keyless → v1.5.0, review → v1.6.0, v2.0.0 clause, policy clause, "Last updated"; docs parentheticals renumbered
-- [ ] `rpack-format.md` promoted; path and `## SLSA buildType v1` heading unchanged; `test_spec_anchor_frozen` green; `docs/media-type.md` created with ledger state A
+- [ ] `rpack-format.md` promoted; path and `## SLSA buildType v1` heading unchanged (*corrected 2026-09-20:* the real heading is `### SLSA buildType v1`, same anchor); `test_spec_anchor_frozen` green; `docs/media-type.md` created with ledger state A
 - [ ] `schemas/forgeproof-rpack-1.schema.json` with `$id` = v1.4.0 tag URL; hashed requirements file; driver; structural test green
 - [ ] `share/mime/packages/forgeproof-rpack.xml` and `share/magic/forgeproof` shipped; `format-identity` job required and green, including both asserted limits
 - [ ] `.gitattributes` line; README (format identity section, `ssh-keygen` requirement, four fixtures, test count); PRIVACY.md (never-installs bullet, timestamps row; Writes list unchanged); CHANGELOG `[1.4.0]` incl. the no-byte-changed sentence and the Action note
 - [ ] Source greps green: `attestation` not in the `bundle_for_hash` denylist; `cosign`/`jsonschema`/`xdg-mime`/`update-mime-database`/`gio` absent from the engine and `cmd_preflight`; forbidden phrases absent; no SKILL.md writes repo config; no shell-isms
 - [ ] Four frozen fixtures green on every platform, `--strict` included; seven-key snapshots green; `TestSkillContract` floor unchanged; `hooks/hooks.json` byte-identical
+- [ ] *Added 2026-09-20:* before the tag, ONE errata sweep over `rpack-format.md`, `docs/media-type.md`, and Appendix A/C for wording findings logged since Phase 1 — the spec URL is immutable after the tag, so Minor wording findings are collected for this sweep instead of reopening a phase
 - [ ] Release commit last: `plugin.json` + `PLUGIN_VERSION` → 1.4.0 together; `:530` docstring renumbered; ROADMAP 🧭 → ✅; `claude plugin validate .claude-plugin/plugin.json` clean; full CI + stress green
 - [ ] Release PR pushed (compare URL handed over — own-gate landmine; `--body-file` for any gate-trigger text); **merged with a merge commit**; annotated tag `v1.4.0`; GitHub Release from the CHANGELOG section
 - [ ] Action: left at v1.1.0 (RQ3) and said so in CHANGELOG — or the RQ3 alternative executed after the tag
@@ -475,6 +476,8 @@ Commit: `release: v1.4.0 — a name of its own`
 ## Appendix A — Draft RFC 6838 §5.6 registration template (proposed; nothing here is registered)
 
 Field names follow RFC 6838 §5.6 verbatim (R11); the web form's extra "Object Identifier(s)/OID(s)" field is "N/A". Placeholders in angle brackets are filled at submission.
+
+*Corrected 2026-09-20 (four changes inside the block; it is the single source of the submission text and `docs/media-type.md` carries it line for line):* (1) OpenSSH "8.0 or later" → "8.1 or later" — `ssh-keygen -Y verify` first shipped in 8.1 (openssh.com release notes); (2) "Neither is registered with IANA at the time of this registration" → "Neither appears in the IANA media types registry at the time of this registration" — this plan's own D11 allows the former words on the ledger line only; (3) "Consumers that resolve the recorded relative paths MUST confine resolution to the intended project root" → the SHOULD paragraph on recorded artifact paths — the reference verifier does not confine them (`forgeproof.py:2002-2011`), so a MUST would be a claim the reference implementation fails; the hardening is scheduled with v1.5.0. The paragraph as it now stands also covers the second unconfined value (the chain file's name is built from `str(issue.number)`, `forgeproof.py:1930-1933`), network-share paths, everything the verdict discloses (existence, regular-file status, digest match, and for the chain file whether it parses as JSON), and the fact that the producer's refusal dates from plugin v1.1.0 (commit `3175efb`; the v1.0.1 producer stored the recorded path unvalidated); (4) "can alternatively be performed with Sigstore's cosign" → the sentence stating what cosign checks (the exported attestation's DSSE signature under the exported key, and a supplied artifact's digest among the subjects — `docs/cosign-interop.md`, the `cosign-interop` CI job) and what only the format's own verification binds (the document's own "public_key", the artifact list, the chain), because the spec now defines four attestation checks and cosign performs part of them.
 
 ```
 Type name: application
@@ -542,8 +545,23 @@ Security considerations:
    Free-text members (issue title, requirement text, decisions, notes,
    approver identifiers) are untrusted input: consumers that render
    them as HTML or Markdown MUST escape them to prevent markup or
-   script injection. Consumers that resolve the recorded relative
-   paths MUST confine resolution to the intended project root.
+   script injection.
+
+   The recorded artifact paths, and the issue number from which the
+   chain file's name is built, are untrusted input too: nothing in a
+   document prevents an artifact path that is absolute or that names a
+   network share, nor either value from climbing out of the project
+   with "..". Consumers that resolve them SHOULD confine resolution to
+   the intended project root. The reference producer has refused to
+   record such an artifact path since plugin version 1.1.0; documents
+   from earlier versions may carry one. At the time of this
+   registration the reference verifier does not confine them: it
+   resolves each as given, so verifying a document from an untrusted
+   source can make it open a file outside the project and disclose,
+   through its verdict, whether a file exists there, whether an
+   artifact path names a regular file, whether the file matches the
+   digest recorded for it, and, for the chain file, whether it parses
+   as JSON.
 
    The embedded attestation (format version 1.1.0 and later) is an
    in-toto Statement inside a DSSE envelope inside a Sigstore-style
@@ -567,19 +585,25 @@ Interoperability considerations:
    "forgeproof-rpack".
 
    Verifying the document's own signature requires OpenSSH "ssh-keygen"
-   (8.0 or later, "ssh-keygen -Y verify") in addition to a JSON parser
+   (8.1 or later, "ssh-keygen -Y verify") in addition to a JSON parser
    and SHA-256; the reference verifier is Python 3.11 standard library
    plus ssh-keygen and has no other dependencies. Verifying the
-   embedded attestation requires only Ed25519 and JSON, and can
-   alternatively be performed with Sigstore's cosign.
+   embedded attestation requires only Ed25519 and JSON. Sigstore's
+   cosign can independently check the DSSE signature of the
+   attestation, as exported beside the document, against the exported
+   public key and, for an artifact file supplied to it, that the
+   file's digest is among the signed subjects. That complements and
+   never replaces the verification the format specification defines,
+   which additionally binds the attestation to the document's own
+   "public_key", to its artifact list, and to its chain.
 
    From format version 1.1.0 the document may embed an attestation
    whose payload-type string "application/vnd.in-toto+json" (in-toto
    Attestation Framework) and wrapper media-type string
    "application/vnd.dev.sigstore.bundle.v0.3+json" (Sigstore bundle
-   format) are conventions defined by those projects. Neither is
-   registered with IANA at the time of this registration; this
-   registration neither defines nor claims them.
+   format) are conventions defined by those projects. Neither appears
+   in the IANA media types registry at the time of this registration;
+   this registration neither defines nor claims them.
 
 Published specification:
    ForgeProof .rpack Bundle Format,
@@ -738,6 +762,8 @@ Probes that shaped the rule: `search/64` fires at bytes 26/28 only; `regex/16` n
 
 Skeleton only: `$schema`, `$id`, the eleven required members with types from E14, and the attestation shape that applies **when the member is present** (never implied by `version`). Unknown members are allowed at every level; no `additionalProperties: false` anywhere.
 
+*Corrected 2026-09-20 (one change inside the block, in `$defs.sigstoreBundle`):* `required` was `["mediaType", "verificationMaterial", "dsseEnvelope"]`, `mediaType` carried a pattern, and `verificationMaterial` was `{"type": "object"}`. The schema matches the **verifier**, not the producer's output: the reference verifier accepts a document whose `mediaType` is absent or arbitrary and whose `verificationMaterial` is absent, populated, or not an object (probed), and the spec's "What binds a verifier" forbids rejecting a document over either. So `required` is now `["dsseEnvelope"]` and the two members are described, not constrained. Everything the verifier does enforce stays — `payloadType`, padded-base64 `payload`, exactly one signature object with a string `sig` — so T3-2's negative "`attestation` with two signatures" still fails.
+
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -787,12 +813,12 @@ Skeleton only: `$schema`, `$id`, the eleven required members with types from E14
   "$defs": {
     "sha256hex": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "sigstoreBundle": {
-      "$comment": "Present from format 1.1.0 when the producer emitted one; absence is never inferred from version. Shallow by design: verificationMaterial is owned by the Sigstore bundle format and left untyped.",
+      "$comment": "Present from format 1.1.0 when the producer emitted one; absence is never inferred from version. Constrains only what the reference verifier enforces (the dsseEnvelope shape). mediaType and verificationMaterial are described, never required or constrained: the verifier reads neither, the specification forbids rejecting a document over them, and verificationMaterial is owned by the Sigstore bundle format.",
       "type": "object",
-      "required": ["mediaType", "verificationMaterial", "dsseEnvelope"],
+      "required": ["dsseEnvelope"],
       "properties": {
-        "mediaType": { "type": "string", "pattern": "^application/vnd\\.dev\\.sigstore\\.bundle" },
-        "verificationMaterial": { "type": "object" },
+        "mediaType": { "description": "Sigstore bundle media type. The reference producer emits application/vnd.dev.sigstore.bundle.v0.3+json. Not constrained." },
+        "verificationMaterial": { "description": "Opaque to this format; owned by the Sigstore bundle format. The reference producer emits {\"publicKey\": {}}. Not constrained." },
         "dsseEnvelope": {
           "type": "object",
           "required": ["payload", "payloadType", "signatures"],
