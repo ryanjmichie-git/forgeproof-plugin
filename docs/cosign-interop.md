@@ -40,7 +40,7 @@ Exit 0 with `Verified OK` means: the DSSE envelope's signature verifies under th
 
 - **`--key`** — verification is against the key *you* supply, out of band. The attestation wrapper deliberately carries no key material or key hints, so there is nothing self-referential to be fooled by. Cross-check the PEM against the `.rpack`'s `public_key` field (same 32 raw bytes) if you want the binding ForgeProof's own verifier enforces.
 - **`--type slsaprovenance1`** — requires `predicateType` to be `https://slsa.dev/provenance/v1`.
-- **`--insecure-ignore-tlog`** — **required** for these bundles: with `--key`, cosign otherwise demands a Rekor transparency-log entry, and an offline, ephemeral-key bundle has none. This flag does not weaken the signature or claim checks; it skips only the transparency-log lookup. (The planned v1.4 keyless tier is what adds Rekor entries.)
+- **`--insecure-ignore-tlog`** — **required** for these bundles: with `--key`, cosign otherwise demands a Rekor transparency-log entry, and an offline, ephemeral-key bundle has none. This flag does not weaken the signature or claim checks; it skips only the transparency-log lookup. (The planned v1.5 keyless tier is what adds Rekor entries.)
 - **The positional artifact path** — makes cosign hash the file itself. The claim check compares **digests only, never subject names**.
 
 ## Pitfall: do not feed the attestation's own digest back

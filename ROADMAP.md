@@ -2,7 +2,7 @@
 
 **Thesis:** Don't certify the model — attest the work. As AI authors more of the world's code, a verifiable record of *what the AI did, who authorized it, and whether it changed since* stops being a nice-to-have and becomes infrastructure. Every release below advances one layer of that trust stack.
 
-*Last updated: 2026-09-05 · Maintainer: [@ryanjmichie-git](https://github.com/ryanjmichie-git) · Shipped details live in [CHANGELOG.md](CHANGELOG.md)*
+*Last updated: 2026-09-20 · Maintainer: [@ryanjmichie-git](https://github.com/ryanjmichie-git) · Shipped details live in [CHANGELOG.md](CHANGELOG.md)*
 
 This roadmap is directional, not a contract. Order is firm; timing is not. To influence it, open an issue or a discussion.
 
@@ -87,7 +87,24 @@ Fixed the two launch-critical hook bugs: missing top-level `hooks` wrapper in `h
 
 ---
 
-### 🌅 v1.4.0 — Identity, not just integrity
+### 🧭 v1.4.0 — A name of its own
+
+**Narrative.** Infrastructure has names. The industry's attestation vocabulary — in-toto's and Sigstore's media-type strings, SLSA's predicate URIs — is still conventional, unregistered, and being formed; whatever string tools learn first for a format is what they print for a decade. Today `file` calls a `.rpack` "JSON text data" and a Linux file manager calls it plain text. This release gives the bundle a normative specification, a published schema, detection definitions, and a proposed vendor-tree media type — without changing one bundle byte. A name is not a trust signal: registration confers no endorsement, review, or standardization, and every document here says so.
+
+**Major changes**
+- **Normative `.rpack` specification.** `skills/run/references/rpack-format.md` gains a stability statement, an exact definition of the canonical serialization behind `root_digest`, and an emission profile that separates what is normative for *validity* (parsed content, digests, signatures) from what is normative for *emission* (bytes on disk). Verification requirements stated precisely: Python stdlib plus `ssh-keygen`.
+- **Published JSON Schema (2020-12)** for format 1.x at an immutable, tag-pinned `$id`; permissive on unknown members; validated in CI only — the engine still imports nothing.
+- **Detection definitions shipped, never installed.** shared-mime-info XML and a libmagic rule under `share/`, keyed on the `format` member every bundle has carried since v1.0.0, proven in CI against all four frozen fixtures and a fresh bundle — with their limits stated (plain `file` still says `application/json`; a key-sorted re-serialization is detected by name only).
+- **Proposed media type `application/vnd.forgeproof.rpack+json`** (vendor tree), submitted to IANA after the tag. Its status lives in one ledger line in `docs/media-type.md`; nothing else ever claims more than the name. `.rpack` stays; the media type is never embedded in the bundle.
+- **Fourth frozen fixture** from the v1.3.0 engine — the first with an attestation.
+
+**Success criteria:** every frozen fixture and a fresh bundle validate against the published schema in CI; the shipped MIME definition detects all of them with no bundle byte changed; all four fixtures verify with zero errors and zero warnings, strict mode included.
+
+**Out of scope:** any change to bundle bytes, `root_digest` input, the engine's behavior, hooks, skills, or the companion Action. The keyless-identity milestone below is renumbered to v1.5.0 and attested review to v1.6.0; order is unchanged.
+
+---
+
+### 🌅 v1.5.0 — Identity, not just integrity
 
 **Narrative.** Self-generated Ed25519 keys prove tamper-evidence but are ultimately self-attestation. The unresolved question in every "certified AI" debate is *who issues the stamp*. Keyless signing dissolves it: signatures bound to verifiable OIDC identities (a GitHub account, a CI runner) recorded in a public transparency log. Identity plus transparency substitutes for authority — no NATO-type certifying body required.
 
@@ -100,7 +117,7 @@ Fixed the two launch-critical hook bugs: missing top-level `hooks` wrapper in `h
 
 ---
 
-### 🌅 v1.5.0 — Attested review
+### 🌅 v1.6.0 — Attested review
 
 **Narrative.** "Nobody can check code anymore" is the honest problem statement — and provenance alone doesn't fix it; it makes bad code attributable, not detected. This release closes the gap the honest way: an independent review pass (a second, isolated Claude session and/or static analyzers) whose verdict and findings digest are recorded as signed blocks *in the chain*. Not a trust-us stamp on the outside — a verifiable review event on the inside.
 
@@ -119,7 +136,7 @@ Fixed the two launch-critical hook bugs: missing top-level `hooks` wrapper in `h
 
 **Exploring**
 - **GitLab support:** issue → merge request with provenance, via an MCP server (Streamable HTTP, OAuth 2.1 + PKCE, `readOnlyHint`/`destructiveHint` annotations on every tool).
-- **MCP verify endpoint** so Claude web/desktop/Cowork can verify any bundle conversationally.
+- **MCP verify endpoint** so Claude web/desktop/Cowork can verify any bundle conversationally, exchanging bundles under the `application/vnd.forgeproof.rpack+json` media type (status as recorded in `docs/media-type.md` — never claimed beyond it).
 - **Directory strategy:** submissions to the claude.com plugin and connector directories; pursue Anthropic Verified (privacy policy, test project with sample issues, ≥3 example prompts).
 - **Multi-agent provenance:** in coordinated-agent workflows, each subagent signs its own blocks — a chain of custody across a team of AIs.
 
@@ -135,6 +152,6 @@ Fixed the two launch-critical hook bugs: missing top-level `hooks` wrapper in `h
 ## Versioning & compatibility policy
 
 - **SemVer.** Patch = fixes, minor = additive features, major = workflow/config breaking changes.
-- **Bundle format:** versioned independently inside the `.rpack`; changes are additive and the verifier accepts all historical formats, forever (Principle 1).
+- **Bundle format:** versioned independently inside the `.rpack`; changes are additive and the verifier accepts all historical formats, forever (Principle 1). The on-disk serialization (member order, indentation, newline convention) is not part of the format — verifiers re-canonicalize — so no consumer, including ForgeProof's own detection rules, may rely on it beyond the spec's emission profile. One media type (`application/vnd.forgeproof.rpack+json`) names every format revision whose `format` member is `forgeproof-rpack`; `format` and `version` are the in-band identity, and the media type is never embedded in the bundle.
 - **Command renames** (as in v1.1.0) ship with doc updates and a migration note; old invocations are removed, not aliased, to keep the surface small.
 - **Support:** latest minor release receives fixes; verification of old bundles is supported unconditionally.
