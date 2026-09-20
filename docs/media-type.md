@@ -190,6 +190,86 @@ Change controller: Ryan Michie (ForgeProof project),
 Provisional registration? (standards tree only): No
 ```
 
+## Detection files
+
+Two definitions ship under `share/` so that desktop and command-line tools can recognize a bundle. **ForgeProof never installs them.** No skill, hook, or engine command copies them anywhere, runs `update-mime-database` or `xdg-mime`, or writes to your home directory. They are there for you to install by hand, in your own user account, or not at all. CI proves both against every frozen fixture and a fresh bundle on each push (`stress/check_detection.py`), with the limits below asserted rather than hidden.
+
+### shared-mime-info: `share/mime/packages/forgeproof-rpack.xml`
+
+For the desktop MIME database that file managers and GLib applications read. The definition is a sub-class of `application/json`, claims the `*.rpack` glob, and sniffs content: `{` at byte 0 and the `format` member within the first 256 bytes.
+
+Install for your user only:
+
+```sh
+xdg-mime install --mode user share/mime/packages/forgeproof-rpack.xml
+```
+
+which is equivalent to:
+
+```sh
+mkdir -p ~/.local/share/mime/packages
+cp share/mime/packages/forgeproof-rpack.xml ~/.local/share/mime/packages/
+update-mime-database ~/.local/share/mime
+```
+
+Uninstall:
+
+```sh
+xdg-mime uninstall --mode user share/mime/packages/forgeproof-rpack.xml
+```
+
+or delete `~/.local/share/mime/packages/forgeproof-rpack.xml` and run `update-mime-database ~/.local/share/mime` again. System scope is the same with `/usr/share/mime` and root.
+
+To try it without installing anything:
+
+```sh
+T=$(mktemp -d); mkdir -p "$T/mime/packages"
+cp share/mime/packages/forgeproof-rpack.xml "$T/mime/packages/"
+update-mime-database "$T/mime"
+XDG_DATA_HOME="$T" gio info -a standard::content-type .forgeproof/issue-42.rpack
+```
+
+Never run `update-mime-database` on `share/mime` itself: it writes `globs2`, `magic`, `mime.cache` and more beside the XML. And query through `gio info`: on a session without a desktop environment, `xdg-mime query filetype` can fall through to `file`, which does not read this database.
+
+What it reports (asserted in CI):
+
+| File | Result |
+|---|---|
+| named `*.rpack`, any layout (as written, CRLF, compact, key-sorted, BOM-prefixed) | the type above |
+| no extension; as written, CRLF, or compact in the producer's member order | the type above, by content |
+| no extension; key-sorted or BOM-prefixed | `text/plain` — a limit, see [Known limits](#known-limits) |
+| an unrelated document named `*.json` | `application/json` |
+| a game archive's `RP6L…` bytes, no extension | `application/octet-stream` |
+
+### libmagic: `share/magic/forgeproof`
+
+For `file(1)`. There is nothing to install or uninstall: name the magic file on the command line.
+
+```sh
+file -e json -m share/magic/forgeproof --mime-type .forgeproof/issue-42.rpack
+```
+
+**`-e json` is required.** `file` runs its built-in JSON detector before it consults any magic file and stops at the first match, so plain `file --mime-type` prints `application/json` for a bundle, with or without `-m`. That answer is correct, only less specific; it is asserted in CI so that the precedence is documented, not hidden. `-m` names an alternate magic list rather than adding to the default one, so with the command above anything that is not a bundle is reported as `text/plain` or `application/octet-stream`.
+
+`file -C -m` writes `<name>.mgc` into the current directory; compile only in a temporary directory, never inside a checkout.
+
+What it reports with `-e json -m share/magic/forgeproof` (asserted in CI):
+
+| File | Result |
+|---|---|
+| as written, CRLF, or compact in the producer's member order | the type above |
+| key-sorted (indented or minified), or BOM-prefixed | `text/plain` — a limit |
+| unrelated JSON whose `format` is something else | `text/plain` |
+| any bundle **without** `-e json` | `application/json` — the built-in detector's precedence |
+
+### For a future upstream submission
+
+The shared-mime-info test-list line, recorded here for the merge request the [checklist](#upstream-submission-checklist) describes:
+
+```
+issue-996.rpack application/vnd.forgeproof.rpack+json
+```
+
 ## Editor association
 
 Optional and cosmetic: editors treat `.rpack` as plain text unless told otherwise. In VS Code, add to your user or workspace `settings.json`:
@@ -217,6 +297,8 @@ ForgeProof never writes editor settings, `.gitattributes`, or MIME definitions i
 ## Known limits
 
 - **A key-sorted re-serialization escapes content sniffing.** Detection by content keys on the specification's emission profile: `{` at byte 0 and the `format` member within the first 256 bytes. A bundle re-serialized with sorted members (for example by a key-sorting JSON formatter) puts `format` behind the multi-kilobyte `attestation`; it remains valid and verifiable but is recognized by its file name only.
+- **A byte-order mark escapes content sniffing too.** The emission profile has producers write none, and a verifier ignores one; a BOM-prefixed copy is still valid but no longer has `{` at byte 0, so it is recognized by its file name only.
+- **Plain `file` says `application/json`.** Its built-in JSON detector runs before any magic file; the rule under `share/magic/` is reached only with `-e json` (see [Detection files](#detection-files)).
 - **A game archive named `.rpack` is labelled by its name.** On a desktop where a `*.rpack` glob has been installed, a file that fails the content test is still matched by the glob. The label is cosmetic: `verify` rejects anything that is not a ForgeProof bundle.
 
 ## Apple platforms

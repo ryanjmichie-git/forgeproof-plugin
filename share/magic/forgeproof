@@ -1,0 +1,18 @@
+# ForgeProof .rpack provenance bundle (JSON text) — application/vnd.forgeproof.rpack+json
+# (vendor tree; registration status: docs/media-type.md).
+# The identifier is the top-level member "format": "forgeproof-rpack"; its byte offset
+# varies with indentation and newline convention (byte 26 on LF, 28 on CRLF as written
+# by the reference producer), hence a search window rather than a fixed offset.
+#
+# IMPORTANT: file(1) runs its built-in JSON detector (src/is_json.c) BEFORE soft magic
+# and stops on a match, so on a valid bundle this entry is reached only with
+#   file -e json -m share/magic/forgeproof --mime-type issue-N.rpack
+# (MAGIC_NO_CHECK_JSON) or with -k (MAGIC_CONTINUE). Plain `file` prints application/json.
+# A key-sorted re-serialization moves "format" beyond the window and is not detected.
+0	string	{
+>0	search/256	"format":\ "forgeproof-rpack"	ForgeProof provenance bundle (.rpack), JSON text
+!:mime	application/vnd.forgeproof.rpack+json
+!:ext	rpack
+>0	search/256	"format":"forgeproof-rpack"	ForgeProof provenance bundle (.rpack), JSON text
+!:mime	application/vnd.forgeproof.rpack+json
+!:ext	rpack

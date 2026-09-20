@@ -98,6 +98,7 @@ ForgeProof does not:
 - Write to any directory outside the project root and system temp
 - Modify source files (Claude Code's Edit/Write tools do that; ForgeProof only records what changed)
 - Access other projects, home directory files, or system configuration
+- Install MIME type definitions or modify `~/.local/share/mime`, `.gitattributes`, or editor settings — the files under `share/` are opt-in and documented only
 
 ---
 

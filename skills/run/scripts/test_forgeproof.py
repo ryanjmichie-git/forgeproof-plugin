@@ -7,6 +7,7 @@ Integration tests require ssh-keygen: python -m pytest test_forgeproof.py -m int
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -15,6 +16,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from urllib.parse import urlsplit
@@ -4668,6 +4670,9 @@ class TestFormatIdentity:
 
     SPEC_PATH = "skills/run/references/rpack-format.md"
     SCHEMA_PATH = "schemas/forgeproof-rpack-1.schema.json"
+    MIME_XML = "share/mime/packages/forgeproof-rpack.xml"
+    MAGIC_FILE = "share/magic/forgeproof"
+    MEDIA_TYPE = "application/vnd.forgeproof.rpack+json"
     MEDIA_TYPE_DOC = PLUGIN_ROOT / "docs" / "media-type.md"
     FIXTURE_BUNDLES = (
         FIXTURE_V101 / "issue-999.rpack",
@@ -4778,6 +4783,44 @@ class TestFormatIdentity:
             assert conforms(rpack.read_bytes()), rpack.name
         fresh = _real_attested_run(tmp_path, monkeypatch, capsys)
         assert conforms(fresh["rpack"].read_bytes())
+
+    def test_detection_files_single_sourced(self):
+        """The opt-in detection files under share/ name the same type as the
+        spec, the schema, and docs/media-type.md — one spelling, everywhere —
+        and key on the extension the engine writes. Static checks only: the
+        tools that consume these files run in one CI job
+        (stress/check_detection.py), never in this suite."""
+        for rel in (self.MIME_XML, self.MAGIC_FILE, self.SPEC_PATH,
+                    self.SCHEMA_PATH, "docs/media-type.md"):
+            text = (PLUGIN_ROOT / rel).read_text(encoding="utf-8")
+            spellings = set(re.findall(
+                r"application/vnd\.forgeproof(?:[.+-]?\w+)*", text))
+            assert spellings == {self.MEDIA_TYPE}, rel
+
+        ns = {"m": "http://www.freedesktop.org/standards/shared-mime-info"}
+        mime_types = ET.parse(PLUGIN_ROOT / self.MIME_XML).getroot().findall(
+            "m:mime-type", ns)
+        assert [t.get("type") for t in mime_types] == [self.MEDIA_TYPE]
+        assert [g.get("pattern") for g in mime_types[0].findall(
+            "m:glob", ns)] == ["*.rpack"]
+
+        magic = (PLUGIN_ROOT / self.MAGIC_FILE).read_text(encoding="utf-8")
+        mimes = re.findall(r"^!:mime\s+(\S+)\s*$", magic, re.M)
+        exts = re.findall(r"^!:ext\s+(\S+)\s*$", magic, re.M)
+        assert mimes and set(mimes) == {self.MEDIA_TYPE}
+        assert len(exts) == len(mimes) and set(exts) == {"rpack"}
+
+    def test_engine_never_mentions_consumer_tools(self):
+        """The schema validator and the MIME/magic tools are consumer-side:
+        they run in one CI job only. The engine — preflight above all — never
+        names them, so none can become a runtime dependency."""
+        engine = FORGEPROOF_PY.read_text(encoding="utf-8")
+        preflight = inspect.getsource(fp.cmd_preflight)
+        for tool in ("jsonschema", "xdg-mime", "update-mime-database", "gio",
+                     "file -m"):
+            pattern = rf"(?<![\w-]){re.escape(tool)}(?![\w-])"
+            assert not re.search(pattern, engine), tool
+            assert not re.search(pattern, preflight), tool
 
     def test_forbidden_phrases(self):
         """Registration confers no trust, and nothing may claim it happened
