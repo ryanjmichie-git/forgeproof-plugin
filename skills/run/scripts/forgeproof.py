@@ -41,7 +41,7 @@ from typing import Any
 CHAIN_DIR = Path(".forgeproof")
 # Mirrors .claude-plugin/plugin.json, which stays the single source of
 # version truth — a sync test fails the build if the two ever drift.
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.4.0"
 RPACK_VERSION = "1.1.0"
 # Every bundle format version ever shipped. Membership-only and append-only:
 # NEVER an ordering, and no version implies any particular key is present
@@ -527,7 +527,7 @@ def build_sigstore_bundle(envelope: dict, signer) -> dict:
 
 
 class EphemeralEd25519Signer:
-    """v1.3 attestation signer, and the v1.4 seam: a signer is anything with
+    """v1.3 attestation signer, and the v1.5 seam: a signer is anything with
     .public_bytes, .sign(data) -> bytes, and .verification_material() -> dict.
     The keyless tier (Fulcio cert + Rekor tlogEntries) implements the same
     three members and swaps only the verification material, leaving the

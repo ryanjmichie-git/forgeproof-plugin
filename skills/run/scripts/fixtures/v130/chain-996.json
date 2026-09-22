@@ -1,0 +1,115 @@
+[
+  {
+    "index": 0,
+    "timestamp": "2026-09-20T04:55:49.094414+00:00",
+    "action": "genesis",
+    "data": {
+      "issue": 996,
+      "title": "v130 fixture",
+      "requirements": [
+        "REQ-1: fixture requirement"
+      ]
+    },
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "hash": "8fe2c3fa3e37b0283cbcc5ce6817ab04631026a2f4fe52fc6be8e063d58cc52a",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgcLVdwkak2fbRCKpe5eP0otNTT7\nZFxDhHs2hEReKJGNQAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAECT5Qft8O49umD0zYSVuyLDKgAZB5Y3WvPDmWEtsWi4yAKH/OfQKpBeyG\nEUh10iKt1BM+hShJl+p7AEvzC83ycO\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 1,
+    "timestamp": "2026-09-20T04:55:49.196607+00:00",
+    "action": "file-edit",
+    "data": {
+      "path": "src/example_v130.py",
+      "operation": "create",
+      "sha256": "4e8e23e85f1e43d15dc6a9a442099d891c75d963608537dfad8ea65f1b3f1640"
+    },
+    "prev_hash": "8fe2c3fa3e37b0283cbcc5ce6817ab04631026a2f4fe52fc6be8e063d58cc52a",
+    "hash": "7d4abb90edddf61f9103bac3cf5af14692b874f4df2df2d018b6a8efde68f897",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgcLVdwkak2fbRCKpe5eP0otNTT7\nZFxDhHs2hEReKJGNQAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAED0ceQFBRAbylp8KTm6VmHObHBEfuLuTGxYNvcTig5ck40U+zgbt6cfSV\nYMeJCnZEKIB5ydb+9lnuTr7SlBP48P\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 2,
+    "timestamp": "2026-09-20T04:55:49.294782+00:00",
+    "action": "decision",
+    "data": {
+      "context": "fixture context",
+      "choice": "fixture choice",
+      "rationale": "fixture rationale"
+    },
+    "prev_hash": "7d4abb90edddf61f9103bac3cf5af14692b874f4df2df2d018b6a8efde68f897",
+    "hash": "0300556f290dec3e9a2337ea50ff8762c5378ddf57860e89c75f0e3143637a3c",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgcLVdwkak2fbRCKpe5eP0otNTT7\nZFxDhHs2hEReKJGNQAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAED+4ByPIFMmMtt7GJ6Fxmo8jWe5DzCjwCwTbzxvedKhsZ6hMwQ7EKvl83\n1RiTjHiuxCJvu35gUehmSGAexQQcYJ\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 3,
+    "timestamp": "2026-09-20T04:55:49.390451+00:00",
+    "action": "test-result",
+    "data": {
+      "suite": "fixture",
+      "passed": 1,
+      "failed": 0,
+      "coverage": {
+        "REQ-1": [
+          "test_fixture"
+        ]
+      },
+      "failed_tests": []
+    },
+    "prev_hash": "0300556f290dec3e9a2337ea50ff8762c5378ddf57860e89c75f0e3143637a3c",
+    "hash": "b1d236618422f50afcc85745c4a111465c0773c73b6cd732f856c538cce0b1e2",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgcLVdwkak2fbRCKpe5eP0otNTT7\nZFxDhHs2hEReKJGNQAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAECB5OQolbRsT+DzUWHMneetdNFuE8Dsv/5AFDhTr0pgxYKRs8ddl8bwCi\nwDJ7LhETVA4fDxpHzU9e47RcO9pcYN\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 4,
+    "timestamp": "2026-09-20T04:55:49.483347+00:00",
+    "action": "lint-result",
+    "data": {
+      "tool": "ruff",
+      "errors": 0,
+      "warnings": 0
+    },
+    "prev_hash": "b1d236618422f50afcc85745c4a111465c0773c73b6cd732f856c538cce0b1e2",
+    "hash": "9c9ecf4fe7206d7ac510b9c2325b0929ee65b307a0daec07bfbc0264bb66420e",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgcLVdwkak2fbRCKpe5eP0otNTT7\nZFxDhHs2hEReKJGNQAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEAT/9Gr3KHHIqEWULoElTAliPYOy/ckWxJuO/OaHibIvh+IBhKKFFdnIb\n74CcbVZ2QD7TS8tsHqpggzjj130fwJ\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 5,
+    "timestamp": "2026-09-20T04:55:49.588893+00:00",
+    "action": "approval",
+    "data": {
+      "gate": "plan",
+      "decision": "approved",
+      "note": "",
+      "approver": "ryanjmichie@gmail.com"
+    },
+    "prev_hash": "9c9ecf4fe7206d7ac510b9c2325b0929ee65b307a0daec07bfbc0264bb66420e",
+    "hash": "5da788b7e351fd9d670c960fa5ddcc447b0cdd2088bab011abb48d9187893833",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgcLVdwkak2fbRCKpe5eP0otNTT7\nZFxDhHs2hEReKJGNQAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAED1f0rz/SLMOm3GNIsrojm4WDD4tJ7bQJ0U/Gdp8DyrhO2lRJAxmMii+B\nIyzRVh/OPEx/2k4hvvZ/5LwbmvKIIL\n-----END SSH SIGNATURE-----"
+  },
+  {
+    "index": 6,
+    "timestamp": "2026-09-20T04:55:49.805569+00:00",
+    "action": "finalize",
+    "data": {
+      "commit_sha": "deae4b3900ab276f538cd7090e07d4d33bf69f0e",
+      "chain_length": 7,
+      "builder": {
+        "model": {
+          "id": "claude-fable-5-1",
+          "source": "self-reported"
+        },
+        "claude_code": {
+          "version": "2.1.258 (Claude Code)",
+          "source": "measured"
+        },
+        "plugin": {
+          "version": "1.3.0",
+          "source": "engine-constant"
+        }
+      }
+    },
+    "prev_hash": "5da788b7e351fd9d670c960fa5ddcc447b0cdd2088bab011abb48d9187893833",
+    "hash": "66ffe5acddeacfab97cdc5bdcc5cf8b513e90293bc38e424d17b2528196e7ccc",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgcLVdwkak2fbRCKpe5eP0otNTT7\nZFxDhHs2hEReKJGNQAAAAKZm9yZ2Vwcm9vZgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt\nZWQyNTUxOQAAAEAc5R5u3DclJBomTe5Loqd9kjswqiE/TVuGcy6yHFBdDmf0OwjeMEO4+B\noKSp68s99SHxI6dm89I7Fqbfp5hcEH\n-----END SSH SIGNATURE-----"
+  }
+]

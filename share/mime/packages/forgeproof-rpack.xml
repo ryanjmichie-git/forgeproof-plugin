@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ForgeProof .rpack provenance bundle: application/vnd.forgeproof.rpack+json
+     (vendor tree; registration status: docs/media-type.md). Format specification:
+     https://github.com/ryanjmichie-git/forgeproof-plugin/blob/main/skills/run/references/rpack-format.md
+     ForgeProof never installs this file (PRIVACY.md). To install it yourself:
+       user scope:   copy to ~/.local/share/mime/packages/ and run
+                     update-mime-database ~/.local/share/mime
+                     (the xdg-mime one-liner is in docs/media-type.md: XML forbids
+                      a double hyphen inside a comment, so it cannot be spelled here)
+       system scope: copy to /usr/share/mime/packages/ and run update-mime-database /usr/share/mime
+       no install:   T=$(mktemp -d); mkdir -p "$T/mime/packages"
+                     cp share/mime/packages/forgeproof-rpack.xml "$T/mime/packages/"
+                     XDG_DATA_HOME="$T" update-mime-database "$T/mime"
+                     XDG_DATA_HOME="$T" gio info -a standard::content-type FILE
+                     (never run update-mime-database on share/mime itself: it writes
+                      globs2, magic, mime.cache and more next to the XML)
+     Content sniffing keys on the emission profile (spec): "{" at offset 0 and the
+     "format" member within the first 256 bytes. A key-sorted re-serialization is still
+     a valid bundle but is detected by the *.rpack glob only. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/vnd.forgeproof.rpack+json">
+    <comment>ForgeProof provenance bundle</comment>
+    <sub-class-of type="application/json"/>
+    <generic-icon name="text-x-script"/>
+    <magic priority="80">
+      <match type="string" value="{" offset="0">
+        <match type="string" value='"format": "forgeproof-rpack"' offset="1:256"/>
+        <match type="string" value='"format":"forgeproof-rpack"' offset="1:256"/>
+      </match>
+    </magic>
+    <glob pattern="*.rpack"/>
+  </mime-type>
+</mime-info>

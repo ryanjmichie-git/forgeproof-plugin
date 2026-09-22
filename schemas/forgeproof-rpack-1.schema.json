@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/ryanjmichie-git/forgeproof-plugin/v1.4.0/schemas/forgeproof-rpack-1.schema.json",
+  "$comment": "The $id pins the release that last changed this schema; an unchanged schema keeps its $id across releases. Format 1.x is additive forever: unknown members are allowed at every level and no version value implies the presence of any member. Media type: application/vnd.forgeproof.rpack+json (vendor tree; registration status in docs/media-type.md).",
+  "title": "ForgeProof .rpack provenance bundle, format 1.x",
+  "description": "The member table of the normative specification, skills/run/references/rpack-format.md in the same repository; where the two differ, the specification governs. A schema-valid document is not thereby verified: the digests and signatures are outside what a schema can check.",
+  "type": "object",
+  "required": [
+    "version",
+    "format",
+    "issue",
+    "requirements",
+    "artifacts",
+    "decisions",
+    "evaluation",
+    "chain_hash",
+    "public_key",
+    "root_digest",
+    "signature"
+  ],
+  "properties": {
+    "version": {
+      "description": "The format version, of the form 1.<minor>.<patch> for every format 1.x revision. Verifiers recognize versions by membership in a known set, never by ordering, and no version implies that any member is present.",
+      "type": "string",
+      "pattern": "^1\\.[0-9]+\\.[0-9]+$"
+    },
+    "format": {
+      "description": "The in-band identity; always this string.",
+      "const": "forgeproof-rpack"
+    },
+    "issue": {
+      "type": "object",
+      "required": ["number", "title", "url"],
+      "properties": {
+        "number": { "type": "integer" },
+        "title": { "type": "string" },
+        "url": { "description": "May be empty.", "type": "string" }
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "text", "status", "tests"],
+        "properties": {
+          "id": { "type": "string" },
+          "text": { "type": "string" },
+          "status": { "enum": ["covered", "uncovered"] },
+          "tests": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "operation", "sha256"],
+        "properties": {
+          "path": { "description": "Project-relative, forward slashes.", "type": "string" },
+          "operation": { "enum": ["create", "modify"] },
+          "sha256": {
+            "description": "Lowercase hex SHA-256 of the file's raw bytes.",
+            "$ref": "#/$defs/sha256hex"
+          }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["context", "choice", "rationale"],
+        "properties": {
+          "context": { "type": "string" },
+          "choice": { "type": "string" },
+          "rationale": { "type": "string" }
+        }
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "required": [
+        "status",
+        "tests_passed",
+        "tests_failed",
+        "lint_errors",
+        "requirement_coverage",
+        "uncovered_requirements",
+        "failed_tests"
+      ],
+      "properties": {
+        "status": { "enum": ["pass", "partial", "fail"] },
+        "tests_passed": { "type": "integer" },
+        "tests_failed": { "type": "integer" },
+        "lint_errors": { "type": "integer" },
+        "requirement_coverage": {
+          "description": "A string such as \"100%\", never a number.",
+          "type": "string"
+        },
+        "uncovered_requirements": { "type": "array", "items": { "type": "string" } },
+        "failed_tests": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "chain_hash": {
+      "description": "Lowercase hex SHA-256 of the chain file's UTF-8, LF-normalized decoded text, not of its raw bytes.",
+      "$ref": "#/$defs/sha256hex"
+    },
+    "public_key": {
+      "description": "OpenSSH public-key line: ssh-ed25519 <base64> [comment].",
+      "type": "string",
+      "pattern": "^ssh-ed25519 [A-Za-z0-9+/=]+( .*)?$"
+    },
+    "attestation": { "$ref": "#/$defs/sigstoreBundle" },
+    "root_digest": {
+      "description": "Lowercase hex SHA-256 of the canonical serialization of the document with root_digest and signature removed.",
+      "$ref": "#/$defs/sha256hex"
+    },
+    "signature": {
+      "description": "SSHSIG armor under the namespace forgeproof over the root_digest string; exactly the armor, with no leading or trailing bytes.",
+      "type": "string",
+      "pattern": "^-----BEGIN SSH SIGNATURE-----\\n[A-Za-z0-9+/=\\n]*-----END SSH SIGNATURE-----$"
+    }
+  },
+  "$defs": {
+    "sha256hex": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sigstoreBundle": {
+      "$comment": "Present from format 1.1.0 when the producer emitted one; absence is never inferred from version. Constrains only what the reference verifier enforces (the dsseEnvelope shape). mediaType and verificationMaterial are described, never required or constrained: the verifier reads neither, the specification forbids rejecting a document over them, and verificationMaterial is owned by the Sigstore bundle format.",
+      "description": "Optional at every version. An in-toto Statement v1 with a SLSA Provenance v1 predicate, DSSE-signed inside a Sigstore bundle.",
+      "type": "object",
+      "required": ["dsseEnvelope"],
+      "properties": {
+        "mediaType": {
+          "description": "Sigstore bundle media type, for example application/vnd.dev.sigstore.bundle.v0.3+json. Not constrained."
+        },
+        "verificationMaterial": {
+          "description": "Opaque to this format; owned by the Sigstore bundle format. Either the empty state {\"publicKey\": {}} or populated (for example with a certificate and transparency-log entries); the specification states which the reference producer emits. Not constrained."
+        },
+        "dsseEnvelope": {
+          "type": "object",
+          "required": ["payload", "payloadType", "signatures"],
+          "properties": {
+            "payloadType": { "const": "application/vnd.in-toto+json" },
+            "payload": {
+              "description": "Standard base64 with padding.",
+              "type": "string",
+              "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+            },
+            "signatures": {
+              "description": "Exactly one signature object; members other than sig are permitted.",
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": {
+                "type": "object",
+                "required": ["sig"],
+                "properties": { "sig": { "type": "string" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

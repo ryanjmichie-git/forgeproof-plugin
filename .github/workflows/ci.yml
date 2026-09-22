@@ -152,6 +152,43 @@ jobs:
             exit 1
           fi
 
+  # The v1.4.0 ROADMAP criterion, proven mechanically on every push: every
+  # frozen fixture and a fresh bundle from the actual engine validate against
+  # the published JSON Schema, and the detection files shipped under share/
+  # detect all of them, with no bundle byte changed. The tools that CONSUME
+  # those files run here. The validator is pinned exactly, with hashes
+  # (.github/jsonschema-requirements.txt); apt packages cannot be pinned
+  # exactly, so their versions are printed and the drivers assert semantics,
+  # never versions — drift shows up as a failing assertion with a version in
+  # the log. The documented limits are asserted too (plain `file` prints
+  # application/json; a key-sorted copy escapes content sniffing), so they
+  # are proven rather than hidden. check_detection.py COPIES the XML and the
+  # magic file under $RUNNER_TEMP before compiling them: update-mime-database
+  # and `file -C` write beside their input, and must never write into the
+  # checkout. jsonschema, update-mime-database, gio and file appear in this
+  # job ONLY: ForgeProof never installs a MIME definition (PRIVACY.md), and
+  # none of them may ever appear in the engine or in preflight.
+  format-identity:
+    name: format identity (schema + detection)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the consumer-side tools (versions printed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shared-mime-info libglib2.0-bin file
+          dpkg-query -W -f='${Package} ${Version}\n' shared-mime-info libglib2.0-bin file
+          python -m pip install --require-hashes -r .github/jsonschema-requirements.txt
+      - name: "Schema: fixtures and a fresh bundle validate; five negatives fail for their reason"
+        run: python stress/validate_schema.py
+      - name: "Detection: XML and magic rule against every fixture and layout, limits asserted"
+        run: python stress/check_detection.py
+
   validate:
     name: claude plugin validate
     runs-on: ubuntu-latest

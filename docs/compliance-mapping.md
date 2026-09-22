@@ -38,7 +38,7 @@ ForgeProof **emits a SLSA Provenance v1 predicate containing the fields REQUIRED
 1. **Approvals are agent-recorded.** The AI asserts that the human approved at a gate; the `approver` field comes from local git config. This is asserted evidence, not cryptographic proof of consent.
 2. **The model identity is self-reported** by the agent that ran; the Claude Code version is measured; the plugin version is an engine constant. Each field carries its label in the predicate.
 3. **SLSA Build L1 fields, no level claim.** See above.
-4. **Ephemeral keys are self-attestation.** The signing key is generated per run and proves continuity and tamper-evidence, not identity. (The planned v1.4 Sigstore keyless tier is the identity story.)
+4. **Ephemeral keys are self-attestation.** The signing key is generated per run and proves continuity and tamper-evidence, not identity. (The planned v1.5 Sigstore keyless tier is the identity story.)
 5. **No compliance is conferred.** A bundle is evidence to present, mapped above to where it plausibly fits; it does not make anyone compliant with SSDF, the rescinded OMB memoranda, the CISA form, or the CRA.
 
 ## References
