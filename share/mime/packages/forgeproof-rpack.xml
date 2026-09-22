@@ -10,7 +10,7 @@
        system scope: copy to /usr/share/mime/packages/ and run update-mime-database /usr/share/mime
        no install:   T=$(mktemp -d); mkdir -p "$T/mime/packages"
                      cp share/mime/packages/forgeproof-rpack.xml "$T/mime/packages/"
-                     update-mime-database "$T/mime"
+                     XDG_DATA_HOME="$T" update-mime-database "$T/mime"
                      XDG_DATA_HOME="$T" gio info -a standard::content-type FILE
                      (never run update-mime-database on share/mime itself: it writes
                       globs2, magic, mime.cache and more next to the XML)

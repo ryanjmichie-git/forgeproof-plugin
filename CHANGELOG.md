@@ -7,12 +7,13 @@ All notable changes to ForgeProof are documented in this file.
 "A name of its own." **No bundle byte changed**: the bundle format stays at
 1.1.0, no member is added, removed, or re-typed, and the code that writes,
 canonicalizes, signs, and verifies a bundle is untouched. (A bundle written
-by this release differs from a v1.3.0 one only where its attestation records
-the plugin version.) What the release adds is around the format, not in it:
+by this release differs from a v1.3.0 one only where the plugin version is
+recorded: the attestation's builder fields, the chain's finalize block, and
+so `chain_hash`.) What the release adds is around the format, not in it:
 a normative specification, a published JSON Schema, opt-in detection files,
 and a media type name — `application/vnd.forgeproof.rpack+json` (vendor
-tree; proposed, status in `docs/media-type.md`). A name is not a trust
-signal: it changes nothing about what a bundle proves.
+tree; status: `docs/media-type.md`). A name is not a trust signal: it
+changes nothing about what a bundle proves.
 
 Every prior `.rpack` still verifies with zero errors and zero warnings,
 strict mode included, now enforced in CI by **four** frozen fixtures (v1.0.1,
@@ -46,8 +47,8 @@ v1.1.0, v1.2.2, v1.3.0 engines). **forgeproof-verify v1.1.0 remains current
   up front: plain `file` prints `application/json` unless told `-e json`,
   and a key-sorted or BOM-prefixed copy is recognized by its file name only.
 - **`docs/media-type.md`**: the one ledger line that records where the media
-  type's registration stands (today: not yet submitted), the RFC 6838 §5.6
-  template as it will be submitted, what a registration does and does not
+  type's registration stands, the RFC 6838 §5.6 template as it will be
+  submitted, what a registration does and does not
   change (trust, verification, GitHub: nothing), the detection recipes, the
   `.gitattributes` and editor snippets, and the known limits. Every other
   surface uses the bare type name and points there.
@@ -62,32 +63,46 @@ v1.1.0, v1.2.2, v1.3.0 engines). **forgeproof-verify v1.1.0 remains current
   1.1.0) — the first with an attestation: green lenient and strict with zero
   warnings, the three attestation checks `ok`, four tamper cases red.
 - `.gitattributes`: `*.rpack linguist-language=JSON`, so bundles in this
-  repo render as JSON on GitHub; the same optional line is documented for
-  user repos. ForgeProof never writes it for you.
+  repo render as JSON on GitHub, in the file view and in diffs; the same
+  optional line is documented for user repos. ForgeProof never writes it
+  for you.
 - 21 tests (290 → 311): `TestV130Compat` and `TestFormatIdentity` — spec path
   and anchor frozen, canonical form matches the spec, no floats in any
   fixture, the format marker within the first 256 bytes, schema structure,
-  one spelling of the type across every surface, consumer-side tools absent
-  from the engine, no skill touches repo or desktop configuration, and the
-  registration-wording sweep with its one-ledger-line rule.
+  one spelling of the type across the five files that carry it as data (the
+  XML, the magic file, the spec, the schema, `docs/media-type.md`),
+  consumer-side tools absent from the engine, no skill touches repo or
+  desktop configuration, the attestation-wrapper tolerances the spec
+  requires of a verifier, the documented limitation that `verify` resolves
+  recorded paths as given, and the registration-wording sweep with its
+  one-ledger-line rule.
 
 ### Changed
 
 - `README.md`: a "Format identity" section, the `verify` requirement stated
   in one sentence, fixture and test counts refreshed.
+- The documented OpenSSH floor is 8.1 (README, the specification, and the
+  registration template): `ssh-keygen -Y sign` / `-Y verify` first shipped
+  in OpenSSH 8.1. The engine's own strings still say 8.0+ until v1.5.0 —
+  the engine is untouched in this release.
 - `PRIVACY.md` **corrects an omission**: from v1.3.0 the attestation carries
   `startedOn` / `finishedOn` (the first and last chain block times), and the
   chain file has always recorded a time per block. Not a new disclosure —
   the data was already there; the policy now lists it. The "does not" list
-  gains the MIME / `.gitattributes` / editor-settings line.
+  gains the MIME / `.gitattributes` / editor-settings line. File System
+  Access now states the one read outside the project: `verify` opens a
+  bundle's recorded artifact and chain-file paths as given (the security
+  considerations in `docs/media-type.md` say the same).
+- `docs/compliance-mapping.md`, `docs/cosign-interop.md`: the keyless-signing
+  tier renumbered v1.4 → v1.5.
 - `ROADMAP.md`: v1.4.0 is this release; the keyless-signing milestone moves
   to v1.5.0 and attested review to v1.6.0 (order unchanged).
 
 ### Compatibility
 
 - `hooks/hooks.json` and every `SKILL.md` byte-identical to v1.3.0; no new
-  preflight requirement; nothing new is installed, required, or run on a
-  user's machine.
+  preflight requirement. Nothing new is run or required; the new files ship
+  in the plugin directory and are never copied out of it.
 - Engine remains a single stdlib-only file with no new import; the schema
   validator and the MIME tools are CI-only and never named in it.
 

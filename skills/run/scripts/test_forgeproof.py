@@ -4734,6 +4734,10 @@ class TestFormatIdentity:
         assert schema_id.scheme == "https" and schema_id.netloc
         assert "#" not in schema["$id"]
         assert schema_id.path.endswith("/" + self.SCHEMA_PATH)
+        # The path segment before the schema's own repo path is the TAG the
+        # $id is pinned to (immutable), never a branch such as "main".
+        tag = schema_id.path[:-len("/" + self.SCHEMA_PATH)].rsplit("/", 1)[1]
+        assert re.fullmatch(r"v\d+\.\d+\.\d+", tag), tag
 
         props = schema["properties"]
         assert props["format"]["const"] == fp.RPACK_FORMAT
@@ -4821,6 +4825,9 @@ class TestFormatIdentity:
             pattern = rf"(?<![\w-]){re.escape(tool)}(?![\w-])"
             assert not re.search(pattern, engine), tool
             assert not re.search(pattern, preflight), tool
+        # file(1) in list-form subprocess spelling: ["file", "-m", ...].
+        assert not re.search(r"""["']file["']""", engine)
+        assert not re.search(r"""["']file["']""", preflight)
 
     def test_skills_never_write_repo_config(self):
         """Zero footprint: repository, desktop, and editor configuration is
@@ -4832,7 +4839,8 @@ class TestFormatIdentity:
         for skill_md in skills:
             text = skill_md.read_text(encoding="utf-8")
             for token in (".gitattributes", "update-mime-database",
-                          "xdg-mime", "files.associations"):
+                          "xdg-mime", "files.associations",
+                          "linguist-language", "settings.json"):
                 assert token not in text, f"{skill_md.parent.name}: {token}"
 
     def test_forbidden_phrases(self):
@@ -4877,9 +4885,10 @@ class TestFormatIdentity:
     def test_attestation_wrapper_tolerance_matches_spec(
             self, tmp_path, monkeypatch, capsys):
         """The spec's "What binds a verifier": a verifier MUST NOT reject a
-        document over extra members of the signature object, the value of
-        mediaType, or the presence or contents of verificationMaterial — that
-        member is opaque to the format (a later producer may populate it)."""
+        document over extra members of the signature object, the value or
+        absence of mediaType, or the absence, type, or contents of
+        verificationMaterial — that member is opaque to the format (a later
+        producer may populate it)."""
         def add_keyid(b):
             b["attestation"]["dsseEnvelope"]["signatures"][0]["keyid"] = "abc"
 
@@ -4891,11 +4900,22 @@ class TestFormatIdentity:
         def drop_material(b):
             del b["attestation"]["verificationMaterial"]
 
+        def empty_material(b):
+            b["attestation"]["verificationMaterial"] = {}
+
+        def string_material(b):
+            b["attestation"]["verificationMaterial"] = "junk"
+
         def other_media_type(b):
             b["attestation"]["mediaType"] = "application/x-anything"
 
+        def drop_media_type(b):
+            del b["attestation"]["mediaType"]
+
         for i, mutate in enumerate((add_keyid, certificate_material,
-                                    drop_material, other_media_type)):
+                                    drop_material, empty_material,
+                                    string_material, other_media_type,
+                                    drop_media_type)):
             proj, rpack = _attested_deploy(tmp_path / str(i))
             _retamper_attested(rpack, mutate_bundle=mutate)
             monkeypatch.chdir(proj)

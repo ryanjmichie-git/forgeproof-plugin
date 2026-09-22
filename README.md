@@ -29,7 +29,7 @@ claude plugin install forgeproof@claude-community
 ## Requirements
 
 - **Python 3.11+** (stdlib only — no pip dependencies). Either `python3` or `python` on `PATH` works; the plugin detects which one you have.
-- **OpenSSH 8.0+** (provides `ssh-keygen` for Ed25519 signing). Included on macOS and Linux. On Windows it ships as the "OpenSSH Client" optional feature (present by default on Windows 10+, occasionally disabled — enable it under *Settings → System → Optional features*, or install [Git for Windows](https://gitforwindows.org/), which bundles it).
+- **OpenSSH 8.1+** (provides `ssh-keygen` for Ed25519 signing). Included on macOS and Linux. On Windows it ships as the "OpenSSH Client" optional feature (present by default on Windows 10+, occasionally disabled — enable it under *Settings → System → Optional features*, or install [Git for Windows](https://gitforwindows.org/), which bundles it).
 - **GitHub CLI** (`gh`) authenticated to your account — [install](https://cli.github.com/)
 
 ForgeProof checks all of this for you at the start of every `/forgeproof:run` (the preflight step) and tells you exactly what is missing.
@@ -171,7 +171,7 @@ The format has a normative specification, [`skills/run/references/rpack-format.m
 
 A JSON Schema (2020-12) for format 1.x ships at [`schemas/forgeproof-rpack-1.schema.json`](schemas/forgeproof-rpack-1.schema.json). Its immutable, tag-pinned `$id` is `https://raw.githubusercontent.com/ryanjmichie-git/forgeproof-plugin/v1.4.0/schemas/forgeproof-rpack-1.schema.json`. It describes the specification's member table and allows unknown members at every level. It is for editors and tooling: `verify` never reads it.
 
-GitHub renders a `.rpack` as JSON if your repository's `.gitattributes` carries this line:
+GitHub renders a `.rpack` as JSON, in the file view and in diffs, if your repository's `.gitattributes` carries this line:
 
 ```
 *.rpack linguist-language=JSON
@@ -197,7 +197,7 @@ ForgeProof stores provenance data locally in the `.forgeproof/` directory at you
 
 **"No ephemeral key found"** — The key is session-scoped. If you initialized the chain in a previous session, you'll need to re-run `/forgeproof:run N` to generate a new key.
 
-**"ssh-keygen failed"** — Ensure OpenSSH 8.0+ is installed. On macOS, the built-in ssh-keygen works. On Linux, install `openssh-client`. On Windows, enable the "OpenSSH Client" optional feature or install Git for Windows.
+**"ssh-keygen failed"** — Ensure OpenSSH 8.1+ is installed. On macOS, the built-in ssh-keygen works. On Linux, install `openssh-client`. On Windows, enable the "OpenSSH Client" optional feature or install Git for Windows.
 
 **"artifact recheck failed" during finalize** — A recorded file changed on disk after it was recorded. This is finalize refusing to sign a bundle that doesn't match reality. Record the current state of each named file (`record --action file-edit`) and finalize again.
 

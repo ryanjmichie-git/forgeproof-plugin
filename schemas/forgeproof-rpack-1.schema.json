@@ -20,7 +20,7 @@
   ],
   "properties": {
     "version": {
-      "description": "The format version. Verifiers recognize versions by membership in a known set (1.0.0 and 1.1.0 today), never by ordering, and no version implies that any member is present.",
+      "description": "The format version, of the form 1.<minor>.<patch> for every format 1.x revision. Verifiers recognize versions by membership in a known set, never by ordering, and no version implies that any member is present.",
       "type": "string",
       "pattern": "^1\\.[0-9]+\\.[0-9]+$"
     },
@@ -130,10 +130,10 @@
       "required": ["dsseEnvelope"],
       "properties": {
         "mediaType": {
-          "description": "Sigstore bundle media type. The reference producer emits application/vnd.dev.sigstore.bundle.v0.3+json. Not constrained."
+          "description": "Sigstore bundle media type, for example application/vnd.dev.sigstore.bundle.v0.3+json. Not constrained."
         },
         "verificationMaterial": {
-          "description": "Opaque to this format; owned by the Sigstore bundle format. The reference producer emits {\"publicKey\": {}}. Not constrained."
+          "description": "Opaque to this format; owned by the Sigstore bundle format. Either the empty state {\"publicKey\": {}} or populated (for example with a certificate and transparency-log entries); the specification states which the reference producer emits. Not constrained."
         },
         "dsseEnvelope": {
           "type": "object",

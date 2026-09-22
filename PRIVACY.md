@@ -1,12 +1,12 @@
 # ForgeProof Privacy Policy
 
-**Last Updated:** 2026-08-15
+**Last Updated:** 2026-09-22
 
 ---
 
 ## Summary
 
-ForgeProof is a local-only Claude Code plugin. It does not collect telemetry, does not phone home, does not transmit data to any server it controls, and does not access files outside your project directory and the system temp directory. Every claim in this document is verifiable from the source code in this repository.
+ForgeProof is a local-only Claude Code plugin. It does not collect telemetry, does not phone home, does not transmit data to any server it controls, and does not access files outside your project directory and the system temp directory (with one read-side exception: `verify` opens the paths a bundle records — see File System Access). Every claim in this document is verifiable from the source code in this repository.
 
 ---
 
@@ -77,13 +77,14 @@ At no point are private keys:
 
 ## File System Access
 
-**ForgeProof reads and writes only within your project directory and the system temp directory.**
+**ForgeProof reads and writes only within your project directory and the system temp directory**, with one read-side exception, stated under Reads: `verify` follows the paths a bundle records.
 
 ### Reads
 - Project source files (to compute SHA-256 hashes for provenance)
 - `pyproject.toml`, `setup.cfg`, `setup.py`, `requirements.txt`, `package.json`, `go.mod` (to detect project toolchain)
 - `.gitignore` (to check if it exists)
 - `.forgeproof/` directory contents (chain files, `.rpack` bundles)
+- When you run `verify` on a bundle: the files at the artifact paths and the chain-file path the bundle records, opened as given and not confined to the project. A bundle from an untrusted source can therefore make `verify` open a file outside the project, and its verdict discloses whether that file exists and whether it matches the recorded digest. Nothing is written there. (Stated in full in `docs/media-type.md`, security considerations.)
 
 ### Writes
 - `.forgeproof/chain-<issue>.json` — provenance hash chain
@@ -97,7 +98,7 @@ ForgeProof does not:
 - Write to `${CLAUDE_PLUGIN_DATA}`
 - Write to any directory outside the project root and system temp
 - Modify source files (Claude Code's Edit/Write tools do that; ForgeProof only records what changed)
-- Access other projects, home directory files, or system configuration
+- Access other projects, home directory files, or system configuration (beyond the `verify` read stated above)
 - Install MIME type definitions or modify `~/.local/share/mime`, `.gitattributes`, or editor settings — the files under `share/` are opt-in and documented only
 
 ---
@@ -189,6 +190,7 @@ The entire plugin is open source under the MIT license.
 
 | Date | Version | Change |
 |------|---------|--------|
+| 2026-09-22 | 1.4.0 | Added the Timestamps row to the bundle table (the attestation's `startedOn` / `finishedOn`, and the chain file's per-block times — an omission corrected, not a new disclosure); the "does not" list gains the MIME-definition / `.gitattributes` / editor-settings line (the files under `share/` are opt-in and never installed); File System Access now states the one read outside the project: `verify` opens a bundle's recorded artifact and chain-file paths as given |
 | 2026-08-15 | 1.3.0 | **Corrected a live inaccuracy:** the bundle has always carried `username@hostname` in the public-key comment; the "no personal information" claim was false and is now stated accurately. Added the v1.3.0 additions: approver git email in approval blocks/attestation, the two attestation sidecar files, local in-process seed parsing for DSSE signing, refreshed stdlib import list |
 | 2026-07-03 | 1.1.0 | Updated hook scope to match v1.1.0 behavior (matcher `Bash\|PowerShell`, per-call spawn cost stated plainly, per-file lint); refreshed paths and command names after the skill rename |
 | 2026-04-15 | 1.0.0 | Initial privacy policy |

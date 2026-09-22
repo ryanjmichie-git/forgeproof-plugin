@@ -278,7 +278,7 @@ Note on EOL: git EOL conversion of a user's `.rpack` does **not** break verifica
 **T3-2 — Published JSON Schema.**
 - Rationale: a machine-readable description at a stable, immutable URL; the schema's acceptance tests need all four fixtures (T0).
 - Files: `schemas/forgeproof-rpack-1.schema.json` (Appendix C); `stress/validate_schema.py` (CI driver, imports `jsonschema` — never imported by the engine or the tests); `.github/jsonschema-requirements.txt` (`jsonschema==4.26.0` + transitive pins with `--hash` lines, generated once with pip-compile `--generate-hashes` — *corrected 2026-09-20:* generated with `uv pip compile --generate-hashes --universal --python-version 3.11`, uv being the house tool: one universal file installs with `--require-hashes` on the CI runner (ubuntu, Python 3.11) and on a maintainer's Windows box); `TestFormatIdentity.test_schema_is_structurally_sane` (stdlib).
-- Acceptance (CI, `format-identity` job): the four fixtures, a fresh bundle from `stress/make_bundle.py`, and the fresh bundle with an extra unknown top-level member all **validate**; wrong `format`, missing `signature`, `version: "2.0.0"`, `attestation` with two signatures, `evaluation.tests_passed: 1.5` all **fail**. Stdlib test: `$schema` is the 2020-12 URI; `$id` is absolute, fragment-free, and its path ends with the schema's own repo path; `properties.format.const == fp.RPACK_FORMAT`; every member of `fp.KNOWN_RPACK_VERSIONS` matches `properties.version.pattern`; `attestation` not in `required`; no `additionalProperties: false` anywhere. *Corrected 2026-09-20 (two decisions by Ryan, made after this text was written; nothing above is withdrawn):* (1) **What the schema describes** — the specification's member table: what a valid format-1.x document looks like. It relaxes only where the specification tells verifiers to tolerate something: unknown members at every level, `mediaType`, and `verificationMaterial` (Appendix C). It is not "whatever `verify` accepts": the reference verifier tolerates more than the member table allows (an unrecognized `version`, for instance, is one warning and never an error), and the schema does not follow it there — the five negatives above stay exactly as written. (2) **One more acceptance case** — a document whose `attestation` has no `mediaType` and no `verificationMaterial` **validates** (a driver positive), and the stdlib test also asserts that the attestation sub-schema's `required` is exactly `["dsseEnvelope"]` and that `mediaType` / `verificationMaterial` carry no constraining keyword, so that nothing can quietly make them required again. The driver additionally requires each negative to fail for its intended reason: exactly one validation error, at the expected instance path, from the expected keyword.
+- Acceptance (CI, `format-identity` job): the four fixtures, a fresh bundle from `stress/make_bundle.py`, and the fresh bundle with an extra unknown top-level member all **validate**; wrong `format`, missing `signature`, `version: "2.0.0"`, `attestation` with two signatures, `evaluation.tests_passed: 1.5` all **fail**. Stdlib test: `$schema` is the 2020-12 URI; `$id` is absolute, fragment-free, and its path ends with the schema's own repo path; `properties.format.const == fp.RPACK_FORMAT`; every member of `fp.KNOWN_RPACK_VERSIONS` matches `properties.version.pattern`; `attestation` not in `required`; no `additionalProperties: false` anywhere. *Corrected 2026-09-20 (two decisions by Ryan, made after this text was written; nothing above is withdrawn):* (1) **What the schema describes** — the specification's member table: what a valid format-1.x document looks like. It relaxes only where the specification tells verifiers to tolerate something: unknown members at every level, `mediaType`, and `verificationMaterial` (Appendix C). It is not "whatever `verify` accepts": the reference verifier tolerates more than the member table allows (an unrecognized `version`, for instance, is one warning and never an error), and the schema does not follow it there — the five negatives above stay exactly as written. *Corrected 2026-09-22:* the example is imprecise — the schema's `version` pattern follows the `1.<minor>.<patch>` form the specification's Identity section states (added in the pre-tag sweep), so an unrecognized version of that form (`1.5.0`) validates and is one warning to `verify`; only a version outside the form (`2.0.0`, `1.1`) fails the schema while `verify` still passes it with one warning. (2) **One more acceptance case** — a document whose `attestation` has no `mediaType` and no `verificationMaterial` **validates** (a driver positive), and the stdlib test also asserts that the attestation sub-schema's `required` is exactly `["dsseEnvelope"]` and that `mediaType` / `verificationMaterial` carry no constraining keyword, so that nothing can quietly make them required again. The driver additionally requires each negative to fail for its intended reason: exactly one validation error, at the expected instance path, from the expected keyword.
 - Scope: `.rpack` only; chain file deferred (triage). Principle 1, 2. Milestone v1.4.0.
 
 **T3-3 — `.gitattributes` Linguist mapping (plugin repo) + documented user snippet.**
@@ -300,7 +300,7 @@ Note on EOL: git EOL conversion of a user's `.rpack` does **not** break verifica
 
 **Emission clause dependency (resolved first).** The rules below key on "`{` at byte 0 and `"format": "forgeproof-rpack"` or `"format":"forgeproof-rpack"` within bytes 1–256". That is sound only because the spec's emission profile (Appendix B, verbatim) makes it a MUST for the reference producer and a SHOULD for others. **Stated plainly everywhere the rules ship:** a canonically re-serialized bundle (sorted members put `format` behind the multi-kilobyte `attestation`) remains valid and verifiable but may escape content-based detection; it is still detected by name.
 
-**T2-1 — shared-mime-info XML** (`share/mime/packages/forgeproof-rpack.xml`, Appendix B.1). Tested 2026-09-16 (E7). Acceptance in CI: compiles with `update-mime-database` without warnings; `gio info` under an isolated `XDG_DATA_HOME` reports our type for all four fixtures, the fresh bundle, and derived CRLF/sorted/compact/BOM copies named `.rpack`; content-only (`noext` copies) reports our type for LF and CRLF and `text/plain` for sorted/compact (asserted as the documented limit); `application/json` for a `.json`-named unrelated document; `application/octet-stream` for `RP6L…` bytes without a name. Upstream test-list line recorded in `docs/media-type.md` for a future MR: `issue-996.rpack application/vnd.forgeproof.rpack+json`. Principle 2. Milestone v1.4.0.
+**T2-1 — shared-mime-info XML** (`share/mime/packages/forgeproof-rpack.xml`, Appendix B.1). Tested 2026-09-16 (E7). Acceptance in CI: compiles with `update-mime-database` without warnings; `gio info` under an isolated `XDG_DATA_HOME` reports our type for all four fixtures, the fresh bundle, and derived CRLF/sorted/compact/BOM copies named `.rpack`; content-only (`noext` copies) reports our type for LF and CRLF and `text/plain` for sorted/compact (*corrected 2026-09-22:* sorted — indented or minified — and BOM-prefixed; compact in insertion order is detected by content) (asserted as the documented limit); `application/json` for a `.json`-named unrelated document; `application/octet-stream` for `RP6L…` bytes without a name. Upstream test-list line recorded in `docs/media-type.md` for a future MR: `issue-996.rpack application/vnd.forgeproof.rpack+json`. Principle 2. Milestone v1.4.0.
 
 **T2-2 — libmagic rule** (`share/magic/forgeproof`, Appendix B.2). Tested 2026-09-16 with file-5.46. Acceptance in CI: `file -e json -m share/magic/forgeproof --mime-type` → our type for the four fixtures, the fresh bundle, CRLF and compact-insertion-order copies; `text/plain` for sorted and BOM copies and for an unrelated JSON document (asserted limits); **default `file --mime-type` on a bundle still prints `application/json`** (asserted: the precedence is documented, not hidden); `file -C -m` compiles in `$RUNNER_TEMP` (never in the checkout — it writes `<name>.mgc` into the cwd). Principle 2. Milestone v1.4.0.
 
@@ -400,7 +400,7 @@ Commit: `release: v1.4.0 — a name of its own`
 | Layer | What proves it | Where it runs |
 |---|---|---|
 | **Unit** (stdlib + pytest) | `TestV130Compat` (green lenient/strict, `warnings == []`, attestation checks `ok`, four tamper cases, no CR); `TestFormatIdentity`: `test_format_marker_in_prefix` (four fixtures + fresh bundle), `test_spec_anchor_frozen`, `test_canonical_form_matches_spec`, `test_no_floats_in_fixtures`, `test_schema_is_structurally_sane`, `test_detection_files_single_sourced`, `test_engine_never_mentions_consumer_tools`, `test_skills_never_write_repo_config`, `test_forbidden_phrases` (D11) | plugin CI matrix (ubuntu/macos/windows + windows bash&cmd + debian python3-only) via `FP_TESTS` |
-| **Functional** | Required `format-identity` job: (a) schema — four fixtures + fresh + fresh-with-unknown-member validate, five negatives fail, pinned `jsonschema==4.26.0` with hashes; (b) MIME — `update-mime-database` compiles the XML; `gio info` under isolated `XDG_DATA_HOME` on the fixture/fresh/CRLF/sorted/compact/BOM/`noext`/`RP6L`/`.json` matrix with the documented limits asserted; (c) magic — `file -e json -m` matrix incl. the asserted default-`application/json` precedence and `file -C` in `$RUNNER_TEMP`; stress harness unchanged | `.github/workflows/ci.yml` |
+| **Functional** | Required `format-identity` job: (a) schema — four fixtures + fresh + fresh-with-unknown-member validate (*corrected 2026-09-22:* eleven positives — those six, the bare-attestation case T3-2's correction records, and the pre-tag sweep's four: fresh without `attestation`, fresh at `version` `1.0.0`, fresh with a non-string `mediaType` and a non-object `verificationMaterial`, fresh with every integer count negative — `issue.number`, `tests_passed`, `tests_failed`, `lint_errors`), five negatives fail, pinned `jsonschema==4.26.0` with hashes; (b) MIME — `update-mime-database` compiles the XML; `gio info` under isolated `XDG_DATA_HOME` on the fixture/fresh/CRLF/sorted/compact/BOM/`noext`/`RP6L`/`.json` matrix with the documented limits asserted; (c) magic — `file -e json -m` matrix incl. the asserted default-`application/json` precedence and `file -C` in `$RUNNER_TEMP`; stress harness unchanged | `.github/workflows/ci.yml` |
 | **User** | Scratch repo: a committed `.rpack` with and without the `.gitattributes` line — file view and diff view compared (OQ1); VS Code `files.associations` + `json.schemas` snippet validates a fixture; `xdg-mime install --mode user` on a Linux desktop → file manager shows "ForgeProof provenance bundle" (or `gio info` if no desktop); `file -e json -m share/magic/forgeproof` on a real bundle; `git status` in a user repo after a full run shows only `.forgeproof/` — recorded in the release PR | manual, recorded |
 | **Regression** | Four frozen fixtures green everywhere, `--strict` included; seven-key JSON snapshots unchanged; `TestSkillContract` floor unchanged; `test_engine_source_has_no_shell_isms` unchanged; PRIVACY.md Writes list unchanged; `hooks/hooks.json` byte-identical; `PLUGIN_VERSION` ↔ `plugin.json` sync; `claude plugin validate` | plugin CI, every push |
 
@@ -479,6 +479,8 @@ Field names follow RFC 6838 §5.6 verbatim (R11); the web form's extra "Object I
 
 *Corrected 2026-09-20 (four changes inside the block; it is the single source of the submission text and `docs/media-type.md` carries it line for line):* (1) OpenSSH "8.0 or later" → "8.1 or later" — `ssh-keygen -Y verify` first shipped in 8.1 (openssh.com release notes); (2) "Neither is registered with IANA at the time of this registration" → "Neither appears in the IANA media types registry at the time of this registration" — this plan's own D11 allows the former words on the ledger line only; (3) "Consumers that resolve the recorded relative paths MUST confine resolution to the intended project root" → the SHOULD paragraph on recorded artifact paths — the reference verifier does not confine them (`forgeproof.py:2002-2011`), so a MUST would be a claim the reference implementation fails; the hardening is scheduled with v1.5.0. The paragraph as it now stands also covers the second unconfined value (the chain file's name is built from `str(issue.number)`, `forgeproof.py:1930-1933`), network-share paths, everything the verdict discloses (existence, regular-file status, digest match, and for the chain file whether it parses as JSON), and the fact that the producer's refusal dates from plugin v1.1.0 (commit `3175efb`; the v1.0.1 producer stored the recorded path unvalidated); (4) "can alternatively be performed with Sigstore's cosign" → the sentence stating what cosign checks (the exported attestation's DSSE signature under the exported key, and a supplied artifact's digest among the subjects — `docs/cosign-interop.md`, the `cosign-interop` CI job) and what only the format's own verification binds (the document's own "public_key", the artifact list, the chain), because the spec now defines four attestation checks and cosign performs part of them.
 
+*Corrected 2026-09-22 (pre-tag errata sweep; five changes inside the block, `docs/media-type.md` updated line for line):* (1) the network-share consequence is now stated — "on Windows a recorded network-share path is opened like any other path" — in the sentence that says the reference verifier resolves each path as given; (2) the producer's refusal is scoped to the producing platform ("as the producing platform interprets it"): on POSIX a project file literally named `..\..\outside.txt` is an ordinary relative path that `record` accepts (`forgeproof.py:1045-1055`), and a Windows verifier reads the stored string as a climb; (3) the chain-file leg discloses content, not only whether the file parses — when it parses as an array of objects the verdict echoes its element count, the members `index`, `action` and `timestamp` of those objects, and the `commit_sha` in the `data` object of the last element whose `action` is `finalize` (`forgeproof.py:2226-2237`, `:1708-1716`; probed through the CLI) — so the 2026-09-20 note above overstates with "everything the verdict discloses": the `Artifact unreadable: ... ({e})` leg also echoes an OSError string; (4) "never under any key or key hint carried inside the attestation itself" → "a key or key hint carried inside the attestation itself is never a substitute for it", agreeing with the specification's MAY (a verifier implementing Sigstore's rules may additionally verify a populated `verificationMaterial`); (5) the cosign sentence names the two sidecar files once (`.sigstore.json`, `.pub.pem`).
+
 ```
 Type name: application
 
@@ -550,25 +552,30 @@ Security considerations:
    The recorded artifact paths, and the issue number from which the
    chain file's name is built, are untrusted input too: nothing in a
    document prevents an artifact path that is absolute or that names a
-   network share, nor either value from climbing out of the project
-   with "..". Consumers that resolve them SHOULD confine resolution to
-   the intended project root. The reference producer has refused to
-   record such an artifact path since plugin version 1.1.0; documents
-   from earlier versions may carry one. At the time of this
-   registration the reference verifier does not confine them: it
-   resolves each as given, so verifying a document from an untrusted
-   source can make it open a file outside the project and disclose,
-   through its verdict, whether a file exists there, whether an
-   artifact path names a regular file, whether the file matches the
-   digest recorded for it, and, for the chain file, whether it parses
-   as JSON.
+   network share, nor either value from climbing out of the project with
+   "..". Consumers that resolve them SHOULD confine resolution to the
+   intended project root. The reference producer has refused to record
+   such an artifact path, as the producing platform interprets it, since
+   plugin version 1.1.0; documents from earlier versions may carry one.
+   At the time of this registration the reference verifier does not
+   confine them: it resolves each as given (on Windows a recorded
+   network-share path is opened like any other path), so verifying a
+   document from an untrusted source can make it open a file outside the
+   project and disclose, through its verdict, whether a file exists
+   there, whether an artifact path names a regular file, whether the
+   file matches the digest recorded for it, and, for the chain file,
+   whether it parses as JSON and, when it parses as an array of objects,
+   its element count, the values of the members "index", "action" and
+   "timestamp" of those objects, and the "commit_sha" in the "data"
+   object of the last element whose "action" is "finalize", all of which
+   the verdict echoes.
 
    The embedded attestation (format version 1.1.0 and later) is an
    in-toto Statement inside a DSSE envelope inside a Sigstore-style
-   bundle object. It is data, not executable content. Its signature
-   MUST be verified under the key carried in the document's own
-   "public_key" member, never under any key or key hint carried inside
-   the attestation itself; its decoded payload is attacker-controlled
+   bundle object. It is data, not executable content. Its signature MUST
+   be verified under the key carried in the document's own "public_key"
+   member; a key or key hint carried inside the attestation itself is
+   never a substitute for it. Its decoded payload is attacker-controlled
    JSON and MUST be parsed with the same limits as the outer document.
 
 Interoperability considerations:
@@ -587,15 +594,16 @@ Interoperability considerations:
    Verifying the document's own signature requires OpenSSH "ssh-keygen"
    (8.1 or later, "ssh-keygen -Y verify") in addition to a JSON parser
    and SHA-256; the reference verifier is Python 3.11 standard library
-   plus ssh-keygen and has no other dependencies. Verifying the
-   embedded attestation requires only Ed25519 and JSON. Sigstore's
-   cosign can independently check the DSSE signature of the
-   attestation, as exported beside the document, against the exported
-   public key and, for an artifact file supplied to it, that the
-   file's digest is among the signed subjects. That complements and
-   never replaces the verification the format specification defines,
-   which additionally binds the attestation to the document's own
-   "public_key", to its artifact list, and to its chain.
+   plus ssh-keygen and has no other dependencies. Verifying the embedded
+   attestation requires only Ed25519 and JSON. Sigstore's cosign can
+   independently check the DSSE signature of the attestation, as
+   exported beside the document in the ".sigstore.json" sidecar file,
+   against the exported public key (the ".pub.pem" sidecar file) and,
+   for an artifact file supplied to it, that the file's digest is among
+   the signed subjects. That complements and never replaces the
+   verification the format specification defines, which additionally
+   binds the attestation to the document's own "public_key", to its
+   artifact list, and to its chain.
 
    From format version 1.1.0 the document may embed an attestation
    whose payload-type string "application/vnd.in-toto+json" (in-toto
@@ -672,6 +680,8 @@ Provisional registration? (standards tree only): No
 > **Validity is independent of emission.** A consumer MUST NOT reject, and a verifier MUST NOT fail, a document solely because it departs from this profile: validity is defined over the parsed JSON value (§Validity), and every digest and signature is computed over the canonical serialization of that value, never over the file's bytes. Detection rules that key on item 1 (the files under `share/`) therefore identify profile-conforming documents reliably and other valid documents on a best-effort basis; in particular, a document re-serialized with sorted members remains valid and remains verifiable but MAY escape content-based detection while still being detected by its file name.
 
 ### B.1 `share/mime/packages/forgeproof-rpack.xml` (XDG layout; modelled on upstream `application/schema+json`, M3)
+
+*Corrected 2026-09-22 (pre-tag errata sweep; the block below is kept as drafted):* the header comment contains `--mode`, and a double hyphen inside an XML comment is not well-formed — expat rejects it, and `update-mime-database` 2.1 prints "Failed to parse", exits 0, and registers nothing, so the 2026-09-16 evidence below cannot have been taken with that comment in place. The shipped file's comment differs from the block only there: it spells the user-scope recipe without the `xdg-mime` one-liner (pointing to `docs/media-type.md` for it) and, since the sweep, prefixes the no-install `update-mime-database` line with `XDG_DATA_HOME="$T"` so the tool does not print its "not in the search path" note; the `<mime-type>` element is byte-identical. Same erratum: the evidence row "sorted / compact bundle → `text/plain`" and T2-1's "`text/plain` for sorted/compact" should read "sorted (indented or minified)" — a compact bundle in insertion order IS detected by content (the second `<match>`), as `stress/check_detection.py` asserts.
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -762,9 +772,11 @@ Probes that shaped the rule: `search/64` fires at bytes 26/28 only; `regex/16` n
 
 Skeleton only: `$schema`, `$id`, the eleven required members with types from E14, and the attestation shape that applies **when the member is present** (never implied by `version`). Unknown members are allowed at every level; no `additionalProperties: false` anywhere.
 
-*Corrected 2026-09-20 (one change inside the block, in `$defs.sigstoreBundle`):* `required` was `["mediaType", "verificationMaterial", "dsseEnvelope"]`, `mediaType` carried a pattern, and `verificationMaterial` was `{"type": "object"}`. The schema matches the **verifier**, not the producer's output: the reference verifier accepts a document whose `mediaType` is absent or arbitrary and whose `verificationMaterial` is absent, populated, or not an object (probed), and the spec's "What binds a verifier" forbids rejecting a document over either. So `required` is now `["dsseEnvelope"]` and the two members are described, not constrained. Everything the verifier does enforce stays — `payloadType`, padded-base64 `payload`, exactly one signature object with a string `sig` — so T3-2's negative "`attestation` with two signatures" still fails.
+*Corrected 2026-09-20 (one change inside the block, in `$defs.sigstoreBundle` — *corrected 2026-09-22:* the block has since had two more, the `minimum` removal the second note records and the annotation wording the third records):* `required` was `["mediaType", "verificationMaterial", "dsseEnvelope"]`, `mediaType` carried a pattern, and `verificationMaterial` was `{"type": "object"}`. The schema matches the **verifier**, not the producer's output: the reference verifier accepts a document whose `mediaType` is absent or arbitrary and whose `verificationMaterial` is absent, populated, or not an object (probed), and the spec's "What binds a verifier" forbids rejecting a document over either. So `required` is now `["dsseEnvelope"]` and the two members are described, not constrained. Everything the verifier does enforce stays — `payloadType`, padded-base64 `payload`, exactly one signature object with a string `sig` — so T3-2's negative "`attestation` with two signatures" still fails.
 
 *Corrected 2026-09-20 (second note; Ryan's decision, recorded with Phase 2):* "matches the verifier" above is scoped to the attestation wrapper. The schema as a whole describes the specification's member table and relaxes only where the specification tells verifiers to tolerate something — unknown members at every level, `mediaType`, `verificationMaterial`; it is not "whatever `verify` accepts" (T3-2). The published file is the block below with `description` annotations taken from the member table and no further constraining keyword; `test_schema_is_structurally_sane` pins `required == ["dsseEnvelope"]` and annotation-only `mediaType` / `verificationMaterial`. *Corrected 2026-09-20:* the four `"minimum": 0` keywords this block carried (on `issue.number`, `tests_passed`, `tests_failed`, `lint_errors`) were removed, because the specification's member table says "integer" with no sign restriction and a released engine (v1.1.0) can emit a negative count in a bundle that every verifier passes.
+
+*Corrected 2026-09-22 (pre-tag errata sweep; annotations only, no constraint keyword changed):* the two `description` strings in `$defs.sigstoreBundle.properties` no longer state what "the reference producer emits" — the `$id` freezes at the tag while a later producer MAY populate `verificationMaterial` without a schema change, so the annotations are now timeless (`mediaType`: "for example ..."; `verificationMaterial`: "either the empty state ... or populated ...; the specification states which the reference producer emits"). The published file's `properties.version.description` likewise dropped "(1.0.0 and 1.1.0 today)" in favour of the `1.<minor>.<patch>` form the specification's Identity section now states; that description is not in this block.
 
 ```json
 {
@@ -819,8 +831,8 @@ Skeleton only: `$schema`, `$id`, the eleven required members with types from E14
       "type": "object",
       "required": ["dsseEnvelope"],
       "properties": {
-        "mediaType": { "description": "Sigstore bundle media type. The reference producer emits application/vnd.dev.sigstore.bundle.v0.3+json. Not constrained." },
-        "verificationMaterial": { "description": "Opaque to this format; owned by the Sigstore bundle format. The reference producer emits {\"publicKey\": {}}. Not constrained." },
+        "mediaType": { "description": "Sigstore bundle media type, for example application/vnd.dev.sigstore.bundle.v0.3+json. Not constrained." },
+        "verificationMaterial": { "description": "Opaque to this format; owned by the Sigstore bundle format. Either the empty state {\"publicKey\": {}} or populated (for example with a certificate and transparency-log entries); the specification states which the reference producer emits. Not constrained." },
         "dsseEnvelope": {
           "type": "object",
           "required": ["payload", "payloadType", "signatures"],

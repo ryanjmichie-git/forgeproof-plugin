@@ -88,25 +88,30 @@ Security considerations:
    The recorded artifact paths, and the issue number from which the
    chain file's name is built, are untrusted input too: nothing in a
    document prevents an artifact path that is absolute or that names a
-   network share, nor either value from climbing out of the project
-   with "..". Consumers that resolve them SHOULD confine resolution to
-   the intended project root. The reference producer has refused to
-   record such an artifact path since plugin version 1.1.0; documents
-   from earlier versions may carry one. At the time of this
-   registration the reference verifier does not confine them: it
-   resolves each as given, so verifying a document from an untrusted
-   source can make it open a file outside the project and disclose,
-   through its verdict, whether a file exists there, whether an
-   artifact path names a regular file, whether the file matches the
-   digest recorded for it, and, for the chain file, whether it parses
-   as JSON.
+   network share, nor either value from climbing out of the project with
+   "..". Consumers that resolve them SHOULD confine resolution to the
+   intended project root. The reference producer has refused to record
+   such an artifact path, as the producing platform interprets it, since
+   plugin version 1.1.0; documents from earlier versions may carry one.
+   At the time of this registration the reference verifier does not
+   confine them: it resolves each as given (on Windows a recorded
+   network-share path is opened like any other path), so verifying a
+   document from an untrusted source can make it open a file outside the
+   project and disclose, through its verdict, whether a file exists
+   there, whether an artifact path names a regular file, whether the
+   file matches the digest recorded for it, and, for the chain file,
+   whether it parses as JSON and, when it parses as an array of objects,
+   its element count, the values of the members "index", "action" and
+   "timestamp" of those objects, and the "commit_sha" in the "data"
+   object of the last element whose "action" is "finalize", all of which
+   the verdict echoes.
 
    The embedded attestation (format version 1.1.0 and later) is an
    in-toto Statement inside a DSSE envelope inside a Sigstore-style
-   bundle object. It is data, not executable content. Its signature
-   MUST be verified under the key carried in the document's own
-   "public_key" member, never under any key or key hint carried inside
-   the attestation itself; its decoded payload is attacker-controlled
+   bundle object. It is data, not executable content. Its signature MUST
+   be verified under the key carried in the document's own "public_key"
+   member; a key or key hint carried inside the attestation itself is
+   never a substitute for it. Its decoded payload is attacker-controlled
    JSON and MUST be parsed with the same limits as the outer document.
 
 Interoperability considerations:
@@ -125,15 +130,16 @@ Interoperability considerations:
    Verifying the document's own signature requires OpenSSH "ssh-keygen"
    (8.1 or later, "ssh-keygen -Y verify") in addition to a JSON parser
    and SHA-256; the reference verifier is Python 3.11 standard library
-   plus ssh-keygen and has no other dependencies. Verifying the
-   embedded attestation requires only Ed25519 and JSON. Sigstore's
-   cosign can independently check the DSSE signature of the
-   attestation, as exported beside the document, against the exported
-   public key and, for an artifact file supplied to it, that the
-   file's digest is among the signed subjects. That complements and
-   never replaces the verification the format specification defines,
-   which additionally binds the attestation to the document's own
-   "public_key", to its artifact list, and to its chain.
+   plus ssh-keygen and has no other dependencies. Verifying the embedded
+   attestation requires only Ed25519 and JSON. Sigstore's cosign can
+   independently check the DSSE signature of the attestation, as
+   exported beside the document in the ".sigstore.json" sidecar file,
+   against the exported public key (the ".pub.pem" sidecar file) and,
+   for an artifact file supplied to it, that the file's digest is among
+   the signed subjects. That complements and never replaces the
+   verification the format specification defines, which additionally
+   binds the attestation to the document's own "public_key", to its
+   artifact list, and to its chain.
 
    From format version 1.1.0 the document may embed an attestation
    whose payload-type string "application/vnd.in-toto+json" (in-toto
@@ -198,24 +204,24 @@ Two definitions ship under `share/` so that desktop and command-line tools can r
 
 For the desktop MIME database that file managers and GLib applications read. The definition is a sub-class of `application/json`, claims the `*.rpack` glob, and sniffs content: `{` at byte 0 and the `format` member within the first 256 bytes.
 
-Install for your user only:
+In the recipes below, `<plugin-dir>` is the directory the plugin was installed to (the marketplace cache or a checkout of this repository) and `<your-project>` is the repository whose bundle you are checking; neither `share/` nor a bundle lives in the other. Install for your user only:
 
 ```sh
-xdg-mime install --mode user share/mime/packages/forgeproof-rpack.xml
+xdg-mime install --mode user <plugin-dir>/share/mime/packages/forgeproof-rpack.xml
 ```
 
 which is equivalent to:
 
 ```sh
 mkdir -p ~/.local/share/mime/packages
-cp share/mime/packages/forgeproof-rpack.xml ~/.local/share/mime/packages/
+cp <plugin-dir>/share/mime/packages/forgeproof-rpack.xml ~/.local/share/mime/packages/
 update-mime-database ~/.local/share/mime
 ```
 
 Uninstall:
 
 ```sh
-xdg-mime uninstall --mode user share/mime/packages/forgeproof-rpack.xml
+xdg-mime uninstall --mode user <plugin-dir>/share/mime/packages/forgeproof-rpack.xml
 ```
 
 or delete `~/.local/share/mime/packages/forgeproof-rpack.xml` and run `update-mime-database ~/.local/share/mime` again. System scope is the same with `/usr/share/mime` and root.
@@ -224,9 +230,9 @@ To try it without installing anything:
 
 ```sh
 T=$(mktemp -d); mkdir -p "$T/mime/packages"
-cp share/mime/packages/forgeproof-rpack.xml "$T/mime/packages/"
-update-mime-database "$T/mime"
-XDG_DATA_HOME="$T" gio info -a standard::content-type .forgeproof/issue-42.rpack
+cp <plugin-dir>/share/mime/packages/forgeproof-rpack.xml "$T/mime/packages/"
+XDG_DATA_HOME="$T" update-mime-database "$T/mime"
+XDG_DATA_HOME="$T" gio info -a standard::content-type <your-project>/.forgeproof/issue-42.rpack
 ```
 
 Never run `update-mime-database` on `share/mime` itself: it writes `globs2`, `magic`, `mime.cache` and more beside the XML. And query through `gio info`: on a session without a desktop environment, `xdg-mime query filetype` can fall through to `file`, which does not read this database.
@@ -246,10 +252,10 @@ What it reports (asserted in CI):
 For `file(1)`. There is nothing to install or uninstall: name the magic file on the command line.
 
 ```sh
-file -e json -m share/magic/forgeproof --mime-type .forgeproof/issue-42.rpack
+file -e json -m <plugin-dir>/share/magic/forgeproof --mime-type <your-project>/.forgeproof/issue-42.rpack
 ```
 
-**`-e json` is required.** `file` runs its built-in JSON detector before it consults any magic file and stops at the first match, so plain `file --mime-type` prints `application/json` for a bundle, with or without `-m`. That answer is correct, only less specific; it is asserted in CI so that the precedence is documented, not hidden. `-m` names an alternate magic list rather than adding to the default one, so with the command above anything that is not a bundle is reported as `text/plain` or `application/octet-stream`.
+**`-e json` is required.** `file` runs its built-in JSON detector before it consults any magic file and stops at the first match, so plain `file --mime-type` prints `application/json` for a bundle, with or without `-m` — for a bundle no larger than the prefix `file` inspects (its `bytes` parameter, at least 1 MiB by default; a bundle is a few kilobytes), beyond which the built-in detector gives up and the answer is `text/plain` without `-m`, or ours with it. That answer is correct, only less specific; it is asserted in CI so that the precedence is documented, not hidden. `-m` names an alternate magic list rather than adding to the default one, so with the command above most files that are not a bundle are reported as `text/plain` or `application/octet-stream` (`file`'s other built-in detectors still run, so a CSV or a tar archive keeps its own type).
 
 `file -C -m` writes `<name>.mgc` into the current directory; compile only in a temporary directory, never inside a checkout.
 
@@ -260,7 +266,7 @@ What it reports with `-e json -m share/magic/forgeproof` (asserted in CI):
 | as written, CRLF, or compact in the producer's member order | the type above |
 | key-sorted (indented or minified), or BOM-prefixed | `text/plain` — a limit |
 | unrelated JSON whose `format` is something else | `text/plain` |
-| any bundle **without** `-e json` | `application/json` — the built-in detector's precedence |
+| a bundle as written, **without** `-e json` | `application/json` — the built-in detector's precedence |
 
 ### For a future upstream submission
 
@@ -272,7 +278,7 @@ issue-996.rpack application/vnd.forgeproof.rpack+json
 
 ## GitHub rendering
 
-GitHub renders a `.rpack` as JSON if the repository's `.gitattributes` carries this line:
+GitHub renders a `.rpack` as JSON, in the file view and in diffs, if the repository's `.gitattributes` carries this line:
 
 ```
 *.rpack linguist-language=JSON
@@ -308,7 +314,7 @@ ForgeProof never writes editor settings, `.gitattributes`, or MIME definitions i
 
 - **A key-sorted re-serialization escapes content sniffing.** Detection by content keys on the specification's emission profile: `{` at byte 0 and the `format` member within the first 256 bytes. A bundle re-serialized with sorted members (for example by a key-sorting JSON formatter) puts `format` behind the multi-kilobyte `attestation`; it remains valid and verifiable but is recognized by its file name only.
 - **A byte-order mark escapes content sniffing too.** The emission profile has producers write none, and a verifier ignores one; a BOM-prefixed copy is still valid but no longer has `{` at byte 0, so it is recognized by its file name only.
-- **Plain `file` says `application/json`.** Its built-in JSON detector runs before any magic file; the rule under `share/magic/` is reached only with `-e json` (see [Detection files](#detection-files)).
+- **Plain `file` says `application/json`.** Its built-in JSON detector runs before any magic file (on a bundle within the prefix `file` inspects — any realistic one); the rule under `share/magic/` is reached only with `-e json` (see [Detection files](#detection-files)).
 - **A game archive named `.rpack` is labelled by its name.** On a desktop where a `*.rpack` glob has been installed, a file that fails the content test is still matched by the glob. The label is cosmetic: `verify` rejects anything that is not a ForgeProof bundle.
 
 ## Apple platforms
